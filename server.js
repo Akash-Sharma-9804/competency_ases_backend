@@ -11,7 +11,7 @@ app.use(express.json());
 // Routes
 const userRoutes = require("./src/routes/userRoutes");
 const companyRoutes = require("./src/routes/companyRoutes");
-const testRoutes = require("./src/routes/test");
+const testRoutes = require("./src/routes/testRoutes");
 app.use("/api/tests", testRoutes);
 app.use("/api/companies", companyRoutes);
 
