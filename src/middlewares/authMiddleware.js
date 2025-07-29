@@ -15,7 +15,17 @@ const verifyToken = (req, res, next) => {
     next();
   } catch (err) {
     console.error('JWT Error:', err.message);
-    return res.status(401).json({ message: 'Invalid or expired token' });
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ 
+        message: 'Session expired. Please login again.',
+        code: 'TOKEN_EXPIRED',
+        expired: true
+      });
+    }
+    return res.status(401).json({ 
+      message: 'Invalid token',
+      code: 'INVALID_TOKEN'
+    });
   }
 };
 

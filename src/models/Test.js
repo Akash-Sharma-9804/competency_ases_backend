@@ -8,7 +8,8 @@ const Test = sequelize.define(
     test_id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     master_test_id: { type: DataTypes.INTEGER, allowNull: false },
     user_id: { type: DataTypes.INTEGER, allowNull: false },
-    company_id: { type: DataTypes.INTEGER, allowNull: false },
+    company_id: { type: DataTypes.INTEGER, allowNull: true },
+
     role_id: { type: DataTypes.INTEGER, allowNull: true },
     resume_id: { type: DataTypes.INTEGER, allowNull: true },
     started_at: { type: DataTypes.DATE, allowNull: true },
@@ -25,6 +26,9 @@ const Test = sequelize.define(
     },
     webcam_recording_path: { type: DataTypes.STRING(500), allowNull: true },
     screen_recording_path: { type: DataTypes.STRING(500), allowNull: true },
+    is_deleted: { type: DataTypes.BOOLEAN, defaultValue: false },
+deleted_at: { type: DataTypes.DATE, allowNull: true },
+
     created_at: { type: DataTypes.DATE, defaultValue: DataTypes.NOW },
   },
   {

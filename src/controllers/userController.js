@@ -2,7 +2,9 @@
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
-
+const Company = require("../models/Company");
+const Resume = require("../models/Resume");
+const uploadToFTP = require("../utils/ftpUploader");
 
 // ✅ User login
 exports.loginUser = async (req, res) => {
@@ -144,3 +146,198 @@ exports.getCandidatesByCompany = async (req, res) => {
   }
 };
 
+exports.getUserProfile = async (req, res) => {
+  try {
+    if (req.auth.role !== "user") {
+      return res.status(403).json({ message: "Unauthorized" });
+    }
+
+    const user = await User.findOne({
+      where: { user_id: req.auth.id },
+      attributes: ["user_id", "name", "email", "gender", "age", "bio", "photo_path", "company_id"],
+      include: [
+        {
+          model: Company,
+          attributes: ["name"],
+          as: "company"
+        },
+        {
+          model: Resume,
+          attributes: ["file_path"],
+          as: "resume",
+          where: { resume_type: "employee" },
+          required: false
+        }
+      ]
+    });
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const plain = user.get({ plain: true });
+
+    res.json({
+      user_id: plain.user_id,
+      name: plain.name,
+      email: plain.email,
+      gender: plain.gender,
+      age: plain.age,
+      bio: plain.bio,
+      photo_path: plain.photo_path,
+      company: plain.company?.name || null,           // ✅ now works
+      resumeUrl: plain.resume?.file_path || null      // ✅ fix typo
+    });
+  } catch (err) {
+    console.error("getUserProfile error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+
+
+exports.updateUserProfile = async (req, res) => {
+  try {
+    if (req.auth.role !== "user")
+      return res.status(403).json({ message: "Unauthorized" });
+
+    const { name, email, gender, age, bio } = req.body;
+
+    const [updated] = await User.update(
+      { name, email, gender, age, bio },
+      { where: { user_id: req.auth.id } }
+    );
+
+    // If nothing was updated, still return the current profile
+    if (updated === 0) {
+      const existingUser = await User.findOne({
+        where: { user_id: req.auth.id },
+        attributes: [
+          "user_id", "name", "email", "gender", "age", "bio", "company_id", "photo_path"
+        ],
+        include: [
+          {
+            model: Company,
+            attributes: ["name"],
+            as: "company"
+          }
+        ]
+      });
+
+      const plain = existingUser.get({ plain: true });
+
+      return res.json({
+        ...plain,
+        company: plain.company?.name || null
+      }); // ✅ MUST return here to stop execution
+    }
+
+    // ✅ Fetch the updated profile
+    const updatedUser = await User.findOne({
+      where: { user_id: req.auth.id },
+      attributes: [
+        "user_id", "name", "email", "gender", "age", "bio", "company_id", "photo_path"
+      ],
+      include: [
+        {
+          model: Company,
+          attributes: ["name"],
+          as: "company"
+        }
+      ]
+    });
+
+    const plain = updatedUser.get({ plain: true });
+
+    return res.json({
+      ...plain,
+      company: plain.company?.name || null
+    });
+
+  } catch (err) {
+    console.error("updateUserProfile error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
+
+
+exports.uploadResume = async (req, res) => {
+  try {
+    const userId = req.auth.id;
+    const companyId = req.auth.company_id || 0;
+
+    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+    const buffer = req.file.buffer;
+    const originalName = req.file.originalname;
+    const mimeType = req.file.mimetype;
+
+    // 🔁 Upload to resume-specific FTP folder
+    const ftpUrl = await uploadToFTP(buffer, originalName, "resumes");
+
+    // Optional: delete previous resume
+    await Resume.destroy({ where: { user_id: userId } });
+
+    await Resume.create({
+      user_id: userId,
+      company_id: companyId,
+      resume_type: "employee",
+      file_path: ftpUrl,
+    });
+
+    res.json({ message: "Resume uploaded", url: ftpUrl });
+  } catch (err) {
+    console.error("uploadResume error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// controllers/userController.js
+exports.uploadPhoto = async (req, res) => {
+  try {
+    const userId = req.auth.id;
+
+    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+    const buffer = req.file.buffer;
+    const originalName = req.file.originalname;
+
+    // 🔁 Upload to 'profile_photos' folder
+    const ftpUrl = await uploadToFTP(buffer, originalName, "profile_photos");
+
+    // ✅ Save to DB
+    await User.update({ photo_path: ftpUrl }, { where: { user_id: userId } });
+
+    res.json({ message: "Photo uploaded", url: ftpUrl });
+  } catch (err) {
+    console.error("uploadPhoto error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+
+exports.startTestNow = async (req, res) => {
+  try {
+    const { id: userId } = req.auth;
+    const { testId } = req.params;
+
+    const test = await Test.findOne({ where: { test_id: testId, user_id: userId } });
+
+    if (!test) {
+      return res.status(404).json({ message: "Test not found" });
+    }
+
+    if (test.status !== "scheduled") {
+      return res.status(400).json({ message: "Test cannot be started" });
+    }
+
+    await test.update({
+      status: "in_progress",
+      started_at: new Date(),
+    });
+
+    return res.json({ message: "Test started" });
+  } catch (err) {
+    console.error("❌ Start test error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};

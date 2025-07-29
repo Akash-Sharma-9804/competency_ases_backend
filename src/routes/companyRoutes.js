@@ -10,6 +10,6 @@ router.post("/login", loginCompany);
 router.get("/stats", verifyToken, getCompanyStats);
 router.put("/profile", verifyToken, updateCompanyProfile);
 router.get("/profile", verifyToken, getCompanyProfile);
-
+    
 
 module.exports = router;
