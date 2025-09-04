@@ -1,3 +1,4 @@
+
 // controllers/testController.js
 const OpenAI = require("openai"); // no destructuring
 // const Test = require("../models/Test");
@@ -7,13 +8,34 @@ const TestMaster = require("../models/TestMaster");
 const User = require("../models/User");
 const UploadedFile = require("../models/UploadedFile"); // model for uploaded_files
 const Test = require("../models/Test"); // <-- your Sequelize model for `tests`
+const SystemCheck = require("../models/SystemCheck"); // Your system_checks table
+// ...exiting code...
+const { createClient } = require("@deepgram/sdk");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+
+// Audio cache directory
+const AUDIO_CACHE_DIR = path.join(__dirname, "..", "cache", "audio");
+
+
+
+const {
+  checkFaceClarity,
+  checkPose,
+  compareWithGemini,
+  compareWithAzure,
+} = require("../utils/verifyUtils");
+const uploadToFTP = require("../utils/ftpUploader");
+const UserImageVerification = require("../models/UserImageVerification");
+
 // ✅ Set up OpenAI (replace later with Gemini)
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
 // ------------------ Generate Questions ------------------
- 
 
 exports.generateAIQuestions = async (req, res) => {
   try {
@@ -176,64 +198,6 @@ Return only the questions in a numbered list, with no extra commentary and no an
   }
 };
 
-// ------------------ Create Test ------------------
-// exports.createTest = async (req, res) => {
-//   try {
-//     if (req.auth.role !== "company") {
-//       return res.status(403).json({ message: "Unauthorized" });
-//     }
-
-//     const { name, role, sector, description, duration, questions } = req.body;
-
-//     // validate
-//     if (!name || !role || !sector || !duration || !Array.isArray(questions)) {
-//       return res.status(400).json({ message: "Missing required fields." });
-//     }
-
-//     // filter and clean questions
-//     const cleanQuestions = questions.filter(
-//       (q) => typeof q === "string" && q.trim() !== ""
-//     );
-
-//     if (cleanQuestions.length === 0) {
-//       return res
-//         .status(400)
-//         .json({ message: "At least one valid question is required." });
-//     }
-
-//     // create test in test_master
-//     const test = await TestMaster.create({
-//       title: name,
-//       job_role: role,
-//       job_sector: sector,
-//       description: description || null,
-//       duration,
-//       status: "active",
-//       company_id: req.auth.id,
-//     });
-
-//     // prepare records with text & source_type
-//     const questionRecords = cleanQuestions.map((q, idx) => ({
-//       test_id: test.test_id,
-//       text: q.trim(),
-//       source_type: "admin",
-//       order_no: idx + 1,
-//     }));
-
-//     console.log("✅ questionRecords preview:", questionRecords[0]);
-
-//     await Question.bulkCreate(questionRecords);
-
-//     return res.status(201).json({
-//       message: "✅ Test created successfully!",
-//       test_id: test.test_id,
-//     });
-//   } catch (err) {
-//     console.error("❌ Create test error:", err);
-//     return res.status(500).json({ message: "Server error" });
-//   }
-// };
-
 exports.createTest = async (req, res) => {
   try {
     const { role, id: authId } = req.auth;
@@ -242,16 +206,33 @@ exports.createTest = async (req, res) => {
       return res.status(403).json({ message: "Unauthorized" });
     }
 
-    const { name, role: jobRole, sector, description, duration, questions } = req.body;
+    const {
+      name,
+      role: jobRole,
+      sector,
+      description,
+      duration,
+      questions,
+    } = req.body;
 
-    if (!name || !jobRole || !sector || !duration || !Array.isArray(questions)) {
+    if (
+      !name ||
+      !jobRole ||
+      !sector ||
+      !duration ||
+      !Array.isArray(questions)
+    ) {
       return res.status(400).json({ message: "Missing required fields." });
     }
 
     // ✅ Clean and validate questions
-    const cleanQuestions = questions.filter(q => typeof q === "string" && q.trim() !== "");
+    const cleanQuestions = questions.filter(
+      (q) => typeof q === "string" && q.trim() !== ""
+    );
     if (cleanQuestions.length === 0) {
-      return res.status(400).json({ message: "At least one valid question is required." });
+      return res
+        .status(400)
+        .json({ message: "At least one valid question is required." });
     }
 
     // ✅ Prepare test data
@@ -289,19 +270,22 @@ exports.createTest = async (req, res) => {
     await Question.bulkCreate(questionRecords);
 
     // ✅ Auto-assign test to user (mock test)
-   if (role === "user") {
- await Test.create({
-  master_test_id: test.test_id,
-  user_id: authId,
-  status: req.body.startInstantly ? "in_progress" : "scheduled",
-  started_at: req.body.startInstantly ? new Date() : req.body.scheduled_start || null,
-  ended_at: req.body.scheduled_end || null,
-});
-}
-
+    if (role === "user") {
+      await Test.create({
+        master_test_id: test.test_id,
+        user_id: authId,
+        status: req.body.startInstantly ? "in_progress" : "scheduled",
+        started_at: req.body.startInstantly
+          ? new Date()
+          : req.body.scheduled_start || null,
+        ended_at: req.body.scheduled_end || null,
+      });
+    }
 
     return res.status(201).json({
-      message: `✅ ${role === "user" ? "Mock test" : "Company test"} created successfully!`,
+      message: `✅ ${
+        role === "user" ? "Mock test" : "Company test"
+      } created successfully!`,
       test_id: test.test_id,
     });
   } catch (err) {
@@ -309,8 +293,6 @@ exports.createTest = async (req, res) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
-
-
 
 // ------------------ Get All Tests ------------------
 exports.getCompanyTests = async (req, res) => {
@@ -335,8 +317,9 @@ exports.getCompanyTests = async (req, res) => {
 // ------------------ GET SINGLE TEST ------------------
 exports.getSingleTest = async (req, res) => {
   try {
-    if (req.auth.role !== "company")
-      return res.status(403).json({ message: "Unauthorized" });
+    //  if (role !== "company" && role !== "user") {
+    //   return res.status(403).json({ message: "Unauthorized" });
+    // }
     const testId = req.params.id;
 
     const test = await TestMaster.findOne({
@@ -615,3 +598,450 @@ exports.getUserAssignedTests = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+exports.systemCheck = async (req, res) => {
+  console.log("System check auth info:", req.auth);
+  console.log("System check params:", req.params);
+  const userId = req.auth.id; // token verified
+  const testId = req.params.id;
+
+  try {
+    const [rows] = await db.query(
+      `SELECT * FROM system_checks WHERE user_id = ? AND test_id = ?`,
+      [userId, testId]
+    );
+
+    if (
+      !rows.length ||
+      !rows[0].camera ||
+      !rows[0].microphone ||
+      !rows[0].speaker
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "System check not completed. Please check camera, mic, and speaker.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "System check completed. Access granted.",
+    });
+  } catch (err) {
+    console.error("System check error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error during system check validation.",
+    });
+  }
+};
+
+// ✅ START TEST
+exports.startTest = async (req, res) => {
+  try {
+    console.log("Start test request body:", req.body);
+    console.log("Start test auth info:", req.auth);
+    const { test_id } = req.body;
+    const user_id = req.auth.id;
+
+    // Check if test exists and is assigned to this user
+    const test = await Test.findOne({
+      where: {
+        test_id,
+        user_id,
+        is_deleted: false,
+      },
+      include: [{ model: TestMaster, as: "test_master" }], // ✅ FIXED HERE
+    });
+
+    if (!test) {
+      return res
+        .status(403)
+        .json({ message: "Unauthorized or test not assigned" });
+    }
+
+    const now = new Date();
+    const scheduledStart = new Date(test.test_master.scheduled_start);
+    const scheduledEnd = new Date(test.test_master.scheduled_end);
+
+    if (now < scheduledStart || now > scheduledEnd) {
+      return res.status(403).json({ message: "Test is not currently active" });
+    }
+
+    return res.status(200).json({
+      message: "Test access granted",
+      test_id,
+      user_id,
+      test_title: test.test_master.title,
+      instructions: test.test_master.instructions,
+    });
+  } catch (err) {
+    console.error("Start Test Error:", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+exports.performSystemCheck = async (req, res) => {
+  try {
+    console.log("Perform system check request body:", req.body);
+    console.log("Perform system check auth info:", req.auth);
+    const { test_id, camera, microphone, speaker, network_speed } = req.body;
+    const user_id = req.auth.id;
+
+    if (!test_id) {
+      return res.status(400).json({ message: "Test ID is required" });
+    }
+
+    // Validate user is assigned this test
+    const test = await Test.findOne({
+      where: { test_id, user_id },
+    });
+
+    if (!test) {
+      return res
+        .status(403)
+        .json({ message: "User not assigned to this test" });
+    }
+
+    // Validate system checks
+    const issues = [];
+    if (!camera) issues.push("Camera");
+    if (!microphone) issues.push("Microphone");
+    if (!speaker) issues.push("Speaker");
+
+    if (issues.length > 0) {
+      return res.status(400).json({
+        message: `System check failed: ${issues.join(", ")} not working`,
+      });
+    }
+
+    // Store or update the system check
+    const [check, created] = await SystemCheck.findOrCreate({
+      where: { test_id, user_id },
+      defaults: {
+        camera,
+        microphone,
+        speaker,
+        network_speed,
+      },
+    });
+
+    if (!created) {
+      // Already exists → update
+      await check.update({ camera, microphone, speaker, network_speed });
+    }
+
+    return res.status(200).json({ message: "System check successful" });
+  } catch (err) {
+    console.error("System Check Error:", err);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+exports.uploadImageVerificationPhoto = async (req, res) => {
+  try {
+    const userId = req.auth.id;
+    const { position, test_id } = req.body;
+
+    if (!test_id) return res.status(400).json({ message: "Missing test ID" });
+    if (!["front", "left", "right"].includes(position))
+      return res.status(400).json({ message: "Invalid face position" });
+
+    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+
+    const buffer = req.file.buffer;
+    const originalName = req.file.originalname;
+
+    const ftpUrl = await uploadToFTP(
+      buffer,
+      originalName,
+      "image_verification"
+    );
+    if (!ftpUrl) {
+      console.error("FTP upload did not return a valid URL");
+      return res.status(500).json({ message: "FTP upload failed" });
+    }
+
+    console.log("Saving image verification with path:", ftpUrl);
+
+    // Check if verification record already exists
+    let record = await UserImageVerification.findOne({
+      where: { user_id: userId, test_id },
+    });
+
+    // Build image path field
+    const updateData = {
+      [`${position}_image_path`]: ftpUrl,
+    };
+
+    if (record) {
+      // Update existing record
+      await record.update(updateData);
+    } else {
+      // Create new record
+      await UserImageVerification.create({
+        user_id: userId,
+        test_id,
+        ...updateData,
+        is_verified: false,
+      });
+    }
+
+    res.json({ message: "Image uploaded", url: ftpUrl });
+  } catch (err) {
+    console.error("Image upload error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+exports.verifyImage = async (req, res) => {
+  try {
+    const userId = req.auth.id;
+    const { test_id } = req.body;
+
+    console.log("[Verify] Verifying user ID:", userId);
+    console.log("[Verify] Received test_id:", test_id);
+
+    const profile = await User.findByPk(userId);
+    console.log("[Verify] Profile photo_path:", profile?.photo_path);
+
+    if (!profile?.photo_path) {
+      return res.status(400).json({ message: "No profile photo found" });
+    }
+
+    if (!test_id) return res.status(400).json({ message: "Missing test ID" });
+
+    const record = await UserImageVerification.findOne({
+      where: { user_id: userId, test_id },
+    });
+
+    if (!record)
+      return res
+        .status(400)
+        .json({ message: "No image verification record found" });
+
+    console.log("[Verify] Uploaded images:", {
+      front: record.front_image_path,
+      left: record.left_image_path,
+      right: record.right_image_path,
+    });
+
+    const missing = [];
+    if (!record.front_image_path) missing.push("front");
+    if (!record.left_image_path) missing.push("left");
+    if (!record.right_image_path) missing.push("right");
+
+    if (missing.length) {
+      return res
+        .status(400)
+        .json({ message: `Missing images: ${missing.join(", ")}` });
+    }
+
+    console.log("[Verify] Running Gemini verification for all poses...");
+    const results = await Promise.all([
+      verifySingleImage(profile.photo_path, record.front_image_path, "front"),
+      verifySingleImage(profile.photo_path, record.left_image_path, "left"),
+      verifySingleImage(profile.photo_path, record.right_image_path, "right"),
+    ]);
+
+    const allPassed = results.every((r) => r.passed);
+    await record.update({ is_verified: allPassed });
+
+    console.log("[Verify] Verification results:", results);
+    res.json({ message: "Verification completed", results });
+  } catch (err) {
+    console.error("Image verification error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+async function verifySingleImage(profilePath, candidatePath, pose) {
+  if (!candidatePath) return { pose, passed: false, error: "Missing image" };
+
+  console.log(`[Verify] Verifying pose: ${pose}`);
+  const isSamePerson = await compareWithAzure(profilePath, candidatePath);
+  console.log(`[Verify] Pose: ${pose} → Match: ${isSamePerson}`);
+  return { pose, candidatePath, passed: isSamePerson, isSamePerson };
+}
+
+
+// ------------------ GET TEST DATA FOR STARTED TEST ------------------
+exports.getStartedTestData = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Step 1: Get test instance (from tests table)
+    const test = await Test.findByPk(id);
+    if (!test) return res.status(404).json({ message: "Test not found" });
+
+    const test_master_id = test.master_test_id;
+
+    // Step 2: Get title from test_master
+    const testMaster = await TestMaster.findByPk(test.master_test_id);
+    if (!testMaster)
+      return res.status(404).json({ message: "Test master not found" });
+
+    // Step 3: Fetch all questions for this test instance (test_id in questions table)
+    const questions = await Question.findAll({
+      where: { test_id: test_master_id },
+      // order: [['question_id', 'ASC']],
+    });
+
+    // Step 4: Send back combined data
+    res.json({
+      test_id: test.test_id,
+      title: testMaster.title, // ✅ from test_master table
+      total_questions: questions.length,
+      questions,
+    });
+  } catch (err) {
+    console.error("❌ getStartedTestData error:", err);
+    res.status(500).json({ error: "Failed to load test data" });
+  }
+};
+
+// Helper function to generate cache key from text
+const generateCacheKey = (text) => {
+  return crypto.createHash("md5").update(text).digest("hex");
+};
+
+// Ensure cache directory exists
+const ensureCacheDir = () => {
+  if (!fs.existsSync(AUDIO_CACHE_DIR)) {
+    fs.mkdirSync(AUDIO_CACHE_DIR, { recursive: true });
+  }
+};
+
+// Deepgram TTS for reading out a question with caching
+exports.getQuestionAudio = async (req, res) => {
+  try {
+    console.log(`🔊 [TTS] Audio request - Test: ${req.params.id}, Question: ${req.params.questionNo}`);
+    
+    const { id, questionNo } = req.params;
+    const test = await Test.findByPk(id);
+    // console.log(`📋 [TTS] Test found:`, test ? 'YES' : 'NO');
+    if (!test) return res.status(404).json({ message: "Test not found" });
+
+    const testMaster = await TestMaster.findByPk(test.master_test_id);
+    // console.log(`📄 [TTS] Test master found:`, testMaster ? 'YES' : 'NO');
+    if (!testMaster)
+      return res.status(404).json({ message: "Test master not found" });
+
+    const questions = await Question.findAll({
+      where: { test_id: testMaster.test_id },
+      order: [["order_no", "ASC"]],
+      raw: true,
+    });
+    // console.log(`❓ [TTS] Questions found: ${questions.length}`);
+
+    const idx = parseInt(questionNo, 10) - 1;
+    // console.log(`🔢 [TTS] Question index: ${idx} (from questionNo: ${questionNo})`);
+    if (idx < 0 || idx >= questions.length) {
+      console.log(`❌ [TTS] Invalid question index: ${idx}, total questions: ${questions.length}`);
+      return res.status(400).json({ message: "Invalid question number" });
+    }
+
+    const text = questions[idx].text;
+    // console.log(`📝 [TTS] Question text: ${text.substring(0, 100)}...`);
+    
+    const cacheKey = generateCacheKey(text);
+    const cachePath = path.join(AUDIO_CACHE_DIR, `${cacheKey}.wav`);
+    // console.log(`🔑 [TTS] Cache key: ${cacheKey}`);
+
+    // Check if audio is already cached
+    if (fs.existsSync(cachePath)) {
+      // console.log(`✅ [TTS] Serving cached audio for question ${questionNo}`);
+      const audioBuffer = fs.readFileSync(cachePath);
+      res.set("Content-Type", "audio/wav");
+      return res.send(audioBuffer);
+    }
+
+    console.log(`🎯 [TTS] Generating new audio for question ${questionNo}`);
+    console.log(`🌐 [TTS] Calling Deepgram API...`);
+
+    // Generate audio with Deepgram TTS API v3
+    let audioBuffer;
+    try {
+      const response = await deepgram.speak.request(
+        { text },
+        {
+          model: "aura-asteria-en",
+          encoding: "linear16",
+          sample_rate: 24000,
+          container: "wav",
+        }
+      );
+
+      console.log(`📦 [TTS] Received response from Deepgram`);
+      console.log(`🔍 [TTS] Response type:`, typeof response);
+      console.log(`🔍 [TTS] Response keys:`, Object.keys(response || {}));
+      
+      // The Deepgram SDK returns a Response object with a 'result' property
+      if (response && response.result) {
+        console.log(`🔍 [TTS] Found result property, type:`, typeof response.result);
+        
+        // The result is likely a fetch Response object
+        if (response.result && typeof response.result.arrayBuffer === 'function') {
+          console.log(`🔍 [TTS] Result has arrayBuffer method`);
+          const arrayBuffer = await response.result.arrayBuffer();
+          audioBuffer = Buffer.from(arrayBuffer);
+        } else if (response.result && typeof response.result.blob === 'function') {
+          console.log(`🔍 [TTS] Result has blob method`);
+          const blob = await response.result.blob();
+          const arrayBuffer = await blob.arrayBuffer();
+          audioBuffer = Buffer.from(arrayBuffer);
+        } else if (Buffer.isBuffer(response.result)) {
+          console.log(`🔍 [TTS] Result is already a Buffer`);
+          audioBuffer = response.result;
+        } else {
+          console.log(`🔍 [TTS] Attempting direct buffer conversion of result`);
+          audioBuffer = Buffer.from(response.result);
+        }
+      } else if (response && response.stream) {
+        console.log(`🔍 [TTS] Found stream property`);
+        const chunks = [];
+        response.stream.on('data', chunk => chunks.push(chunk));
+        await new Promise((resolve, reject) => {
+          response.stream.on('end', resolve);
+          response.stream.on('error', reject);
+        });
+        audioBuffer = Buffer.concat(chunks);
+      } else if (response && typeof response.arrayBuffer === 'function') {
+        console.log(`🔍 [TTS] Response has arrayBuffer method`);
+        audioBuffer = Buffer.from(await response.arrayBuffer());
+      } else if (Buffer.isBuffer(response)) {
+        console.log(`🔍 [TTS] Response is already a Buffer`);
+        audioBuffer = response;
+      } else {
+        console.log(`🔍 [TTS] Attempting direct buffer conversion`);
+        audioBuffer = Buffer.from(response);
+      }
+      
+      console.log(`📊 [TTS] Audio buffer size: ${audioBuffer.length} bytes`);
+      
+      if (!audioBuffer || audioBuffer.length === 0) {
+        throw new Error('Received empty audio buffer from Deepgram');
+      }
+      
+    } catch (deepgramError) {
+      console.error(`❌ [TTS] Deepgram API error:`, deepgramError);
+      throw deepgramError;
+    }
+
+    // Cache the audio
+    ensureCacheDir();
+    fs.writeFileSync(cachePath, audioBuffer);
+    console.log(`💾 [TTS] Audio cached for question ${questionNo} at: ${cachePath}`);
+
+    res.set("Content-Type", "audio/wav");
+    res.send(audioBuffer);
+    console.log(`📤 [TTS] Audio sent to client`);
+  } catch (err) {
+    console.error("❌ [TTS] Deepgram TTS error:", err);
+    res.status(500).json({ message: "TTS failed: " + err.message });
+  }
+};
+
+
+

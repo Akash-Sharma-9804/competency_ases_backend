@@ -45,9 +45,43 @@ exports.loginUser = async (req, res) => {
 
 
 // Register user (only by company)
+// exports.registerUserByCompany = async (req, res) => {
+//   try {
+//     // req.auth comes from JWT
+//     if (req.auth.role !== "company") {
+//       return res.status(403).json({ message: "Forbidden: Only companies can register users" });
+//     }
+
+//     const { name, email, password } = req.body;
+//     if (!name || !email || !password) {
+//       return res.status(400).json({ message: "Name, email, and password are required" });
+//     }
+//  const companyId = req.auth.id; // 👈 this is the logged-in company ID from JWT
+
+//     // check if email already exists
+//     const existing = await User.findOne({ where: { email } });
+//     if (existing) {
+//       return res.status(400).json({ message: "User already exists" });
+//     }
+
+//     const hashed = await bcrypt.hash(password, 10);
+//     const user = await User.create({
+//       name,
+//       email,
+//       password: hashed,
+//       company_id: req.auth.id // company who is creating
+//     });
+
+//     res.status(201).json({ message: "✅ User created by company", user: { id: user.user_id, name: user.name, email: user.email } });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ message: "Server error" });
+//   }
+// };
+
+// Register user (only by company) WITH photo upload
 exports.registerUserByCompany = async (req, res) => {
   try {
-    // req.auth comes from JWT
     if (req.auth.role !== "company") {
       return res.status(403).json({ message: "Forbidden: Only companies can register users" });
     }
@@ -56,25 +90,43 @@ exports.registerUserByCompany = async (req, res) => {
     if (!name || !email || !password) {
       return res.status(400).json({ message: "Name, email, and password are required" });
     }
- const companyId = req.auth.id; // 👈 this is the logged-in company ID from JWT
 
-    // check if email already exists
     const existing = await User.findOne({ where: { email } });
     if (existing) {
       return res.status(400).json({ message: "User already exists" });
     }
 
+    let photoPath = null;
+
+    if (req.file) {
+      const buffer = req.file.buffer;
+      const originalName = req.file.originalname;
+
+      // Upload to FTP under 'profile_photos'
+      photoPath = await uploadToFTP(buffer, originalName, "profile_photos");
+    }
+
     const hashed = await bcrypt.hash(password, 10);
+
     const user = await User.create({
       name,
       email,
       password: hashed,
-      company_id: req.auth.id // company who is creating
+      company_id: req.auth.id,
+      photo_path: photoPath || null
     });
 
-    res.status(201).json({ message: "✅ User created by company", user: { id: user.user_id, name: user.name, email: user.email } });
+    res.status(201).json({
+      message: "✅ User created by company",
+      user: {
+        id: user.user_id,
+        name: user.name,
+        email: user.email,
+        photo: photoPath
+      }
+    });
   } catch (err) {
-    console.error(err);
+    console.error("registerUserByCompany error:", err);
     res.status(500).json({ message: "Server error" });
   }
 };
@@ -146,8 +198,54 @@ exports.getCandidatesByCompany = async (req, res) => {
   }
 };
 
+exports.getUserById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const user = await User.findOne({
+      where: { user_id: id },
+      attributes: ["user_id", "name", "email", "gender", "age", "bio", "photo_path", "company_id"],
+      include: [
+        {
+          model: Company,
+          attributes: ["name"],
+          as: "company"
+        },
+        {
+          model: Resume,
+          attributes: ["file_path"],
+          as: "resume",
+          where: { resume_type: "employee" },
+          required: false
+        }
+      ]
+    });
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const plain = user.get({ plain: true });
+
+    res.json({
+      user_id: plain.user_id,
+      name: plain.name,
+      email: plain.email,
+      gender: plain.gender,
+      age: plain.age,
+      bio: plain.bio,
+      photo_path: plain.photo_path,
+      company: plain.company?.name || null,
+      resumeUrl: plain.resume?.file_path || null
+    });
+  } catch (err) {
+    console.error("getUserById error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+
 exports.getUserProfile = async (req, res) => {
   try {
+      console.log("Authenticated user from token:", req.auth); // <--- DEBUG LINE
     if (req.auth.role !== "user") {
       return res.status(403).json({ message: "Unauthorized" });
     }
@@ -317,6 +415,8 @@ exports.uploadPhoto = async (req, res) => {
 
 exports.startTestNow = async (req, res) => {
   try {
+    console.log("Start test now auth info:", req.auth);
+    console.log("Start test now params:", req.params);
     const { id: userId } = req.auth;
     const { testId } = req.params;
 
@@ -341,3 +441,5 @@ exports.startTestNow = async (req, res) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
+
+

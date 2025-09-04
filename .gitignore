@@ -24,3 +24,6 @@ coverage/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Audio cache
+src/cache/audio/
