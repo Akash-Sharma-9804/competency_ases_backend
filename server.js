@@ -8,7 +8,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:5173", "http://localhost:3000", "http://localhost:5174"],
+    origin: ["http://localhost:5173", "http://localhost:3000", "http://localhost:5174","https://competency-ases.vercel.app"],
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -21,7 +21,7 @@ require('./src/models/relations'); // <-- this sets up associations
 
 // Middlewares
 app.use(cors({
-  origin: ["http://localhost:5173", "http://localhost:3000", "http://localhost:5174"],
+  origin: ["http://localhost:5173", "http://localhost:3000", "http://localhost:5174","https://competency-ases.vercel.app"],
   credentials: true
 }));
 app.use(express.json());
