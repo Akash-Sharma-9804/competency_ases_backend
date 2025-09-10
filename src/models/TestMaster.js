@@ -14,6 +14,7 @@ const TestMaster = sequelize.define("test_master", {
     // ✅ Add these:
   scheduled_start: { type: DataTypes.DATE, allowNull: true },
   scheduled_end: { type: DataTypes.DATE, allowNull: true },
+   timezone: { type: DataTypes.STRING, allowNull: true }, // Store timezone
   is_deleted: { type: DataTypes.BOOLEAN, defaultValue: false },
 deleted_at: { type: DataTypes.DATE, allowNull: true },
 

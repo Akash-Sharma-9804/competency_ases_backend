@@ -1,4 +1,3 @@
-
 // controllers/testController.js
 const OpenAI = require("openai"); // no destructuring
 // const Test = require("../models/Test");
@@ -105,37 +104,34 @@ exports.generateAIQuestions = async (req, res) => {
     let prompt = "";
 
     if (sourceMode === "fileOnly") {
-      prompt = `
+     prompt = `
 You are an expert HR and technical interviewer.
 
-Generate 50 ${
-        difficulty || "medium"
-      }-level multiple-choice interview questions (WITHOUT answers) based **ONLY** on the following reference materials.
-Ignore job role and description.
+Generate 50 ${difficulty || "medium"}-level multiple-choice interview questions (WITHOUT answers), thoughtfully designed to probe both fundamental and practical understanding of the topic, based **ONLY** on the following reference materials.
 
-⚠️ Do not mention "reference material" in the questions. Just ask clear, specific, directly testable questions.
+Avoid generic or definition-based questions unless they are critical to job success. Prioritize questions that test application, problem-solving, scenarios, and domain-specific expertise relevant to the role.
 
 Reference Content:
 ${extraContext}
 
 Return only the questions in a numbered list, with no extra commentary.
 `;
+
     } else if (sourceMode === "jobOnly") {
-      prompt = `
+   prompt = `
 You are an expert HR and technical interviewer.
 
-Generate 50 ${
-        difficulty || "medium"
-      }-level multiple-choice interview questions (WITHOUT answers) based on the following job details:
+Generate 50 ${difficulty || "medium"}-level multiple-choice interview questions (WITHOUT answers), crafted to deeply assess the candidate’s knowledge, reasoning, and practical skills related to the job role.
+
+Focus on scenario-based, problem-solving, and real-world application questions rather than basic fact-recall or overly simple queries, unless they are essential for the job function.
 
 Job Role: ${role}
 Sector: ${sector}
 Job Description: ${description}
 
-Do not use any reference materials, focus only on the job details.
-
 Return only the questions in a numbered list, with no extra commentary.
 `;
+
     } else {
       // ✅ Improved blend mode prompt – plain questions only, no HTML bias
       prompt = `
@@ -160,7 +156,12 @@ ${extraContext ? `\n${extraContext}\n` : ""}
 - Cover a balanced mix of topics from both the job description and the reference content.
 
 🎯 Goal:
-Produce 50 well‑formed, professional‑level interview questions (plain questions only, no answer options).
+Produce 50 highly relevant, professional-grade interview questions (plain questions only, no answer options), designed to challenge and evaluate both theoretical knowledge and practical expertise.
+
+- Questions should explore critical skills, technologies, problem-solving approaches, and decision-making processes.
+- Avoid generic definitions or surface-level questions unless they are indispensable for the role.
+- Emphasize real-world scenarios, case-based questions, troubleshooting tasks, and applied knowledge from both job details and reference content.
+- Ensure each question is clear, concise, and tests a candidate’s ability to perform or reason through tasks required for the job.
 
 Return only the questions in a numbered list, with no extra commentary and no answer choices.
 `;
@@ -490,24 +491,41 @@ exports.updateTestSchedule = async (req, res) => {
     if (req.auth.role !== "company") {
       return res.status(403).json({ message: "Unauthorized" });
     }
-    const { startDateTime, endDateTime } = req.body;
+    
+    const { startDateTime, endDateTime, timezone } = req.body;
     const testId = req.params.id;
+    
+    if (!startDateTime || !endDateTime || !timezone) {
+      return res.status(400).json({ 
+        message: "Start time, end time, and timezone are required" 
+      });
+    }
 
-    if (!startDateTime || !endDateTime) {
-      return res
-        .status(400)
-        .json({ message: "Start and End time are required" });
+    // Convert to UTC for storage
+    const moment = require('moment-timezone');
+    const startUTC = moment.tz(startDateTime, timezone).utc().toDate();
+    const endUTC = moment.tz(endDateTime, timezone).utc().toDate();
+
+    // Validate that end time is after start time
+    if (endUTC <= startUTC) {
+      return res.status(400).json({ 
+        message: "End time must be after start time" 
+      });
     }
 
     const updated = await TestMaster.update(
-      { scheduled_start: startDateTime, scheduled_end: endDateTime },
+      { 
+        scheduled_start: startUTC, 
+        scheduled_end: endUTC,
+        timezone: timezone // Store timezone for reference
+      },
       { where: { test_id: testId, company_id: req.auth.id } }
     );
 
     if (updated[0] === 0) {
-      return res
-        .status(404)
-        .json({ message: "Test not found or not owned by you" });
+      return res.status(404).json({ 
+        message: "Test not found or not owned by you" 
+      });
     }
 
     return res.json({ message: "✅ Schedule updated successfully!" });
@@ -516,6 +534,7 @@ exports.updateTestSchedule = async (req, res) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
+
 
 exports.getAssignedTests = async (req, res) => {
   try {
@@ -966,7 +985,7 @@ exports.getQuestionAudio = async (req, res) => {
       const response = await deepgram.speak.request(
         { text },
         {
-          model: "aura-asteria-en",
+          model: "aura-2-saturn-en",
           encoding: "linear16",
           sample_rate: 24000,
           container: "wav",

@@ -71,15 +71,29 @@ function createSession(socket, { testId, userId, openai, deepgram }) {
       return false;
     }
   }
-
-  async function loadQuestion(index) {
+ 
+ async function loadQuestion(index) {
     if (!state.questions || index >= state.questions.length) {
       safeEmit("test-completed", { answers: true });
       cleanup();
       return;
     }
 
+    // Clear all transcript states for new question - ensure complete reset
     state.currentQuestionIndex = index;
+    state.currentTranscript = "";
+    state.partialAnswer = "";
+    state.awaitingConfirmation = null;
+    state.awaitingReanswerChoice = false;
+    state.recordedChunks = [];
+    state.handlingSubmit = false;
+    
+    // Clear any pending AI debounce timers
+    if (state.socket._aiDebounce) {
+      clearTimeout(state.socket._aiDebounce);
+      state.socket._aiDebounce = null;
+    }
+
     const question = state.questions[index];
 
     const existingAnswer = await Answer.findOne({
@@ -124,24 +138,36 @@ function createSession(socket, { testId, userId, openai, deepgram }) {
     }
   }
 
-  async function analyzeUserSpeech(transcript) {
+async function analyzeUserSpeech(transcript) {
     try {
-      // 🚀 Always flush transcript instantly to frontend (do not wait for AI)
-      safeEmit("live-transcription", { text: transcript, isFinal: true });
+      // Note: Immediate keyword detection is now handled in handleDeepgramMessage
+      // before this function is called, so we only get here for non-keyword cases
 
+      // Additional filtering to prevent unnecessary AI calls
+      // Skip AI analysis for very short or incomplete phrases
+      const words = transcript.split(/\s+/);
+      if (words.length <= 3 &&
+          !/[.!?]$/.test(transcript) && // Not a complete sentence
+          !/\b(complete|done|submit|finished|that's|this is)\b/i.test(transcript)) {
+        console.log(`⏭️ [AI] Skipping analysis for short/incomplete phrase: "${transcript}"`);
+        return;
+      }
+
+      // Only call OpenAI for AI analysis (this runs in background)
       const response = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
-            content: `You are an AI exam proctor. 
-The student is answering verbally. 
+            content: `You are an AI exam proctor.
+The student is answering verbally.
 Your job: decide if they are still thinking, mid-answer, or done.
 
 Rules:
 - If the answer looks incomplete or mid-sentence → CONTINUE
 - If the answer looks like a full thought → COMPLETE
 - Do not decide SUBMIT directly. Only return COMPLETE if done.
+- Consider sentence structure, completeness, and natural pauses
 Reply with exactly one word: CONTINUE or COMPLETE.`,
           },
           {
@@ -157,22 +183,13 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
 
       const raw = response.choices?.[0]?.message?.content || "";
       let intent = "CONTINUE";
-      if (
-        /\b(re[- ]?answer|retry|try again|re[- ]?record|start over|again)\b/i.test(
-          transcript
-        )
-      ) {
-        intent = "RETRY";
-      } else {
-        const match = raw.toUpperCase().match(/(COMPLETE|CONTINUE)/);
-        intent = match ? match[1] : "CONTINUE";
-      }
+      
+      const match = raw.toUpperCase().match(/(COMPLETE|CONTINUE)/);
+      intent = match ? match[1] : "CONTINUE";
 
-      console.log(`🧠 [AI] intent parsed: ${intent}`);
+      console.log(`🧠 [AI] intent parsed: ${intent} for: "${transcript.substring(0, 50)}${transcript.length > 50 ? '...' : ''}"`);
 
-      // If we are already awaiting confirmation, treat this final transcript
-      // as the user's reply to the confirmation prompt (quick keyword parsing).
-      // Treat as reply to either: (a) submit/redo confirmation OR (b) "already answered" choice
+      // Handle confirmation states (moved from keyword detection to here)
       if (
         (state.awaitingConfirmation || state.awaitingReanswerChoice) &&
         transcript &&
@@ -180,7 +197,7 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
       ) {
         const l = transcript.toLowerCase();
 
-        // 1) Re-answer path wins first
+        // 1) Re-answer path
         if (
           /\b(re[- ]?answer|retry|try again|re[- ]?record|start over|again)\b/.test(
             l
@@ -203,7 +220,7 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
           return;
         }
 
-        // 3) Normal submit confirmation (only when not in the "already answered" prompt)
+        // 3) Normal submit confirmation
         if (
           !state.awaitingReanswerChoice &&
           /\b(submit|save|final|done|yes)\b/.test(l)
@@ -216,8 +233,6 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
           state.awaitingConfirmation = null;
           return;
         }
-
-        // otherwise fall through so AI can decide (below)
       }
 
       // Prepare message & (if COMPLETE) generate TTS and include audio in payload
@@ -232,7 +247,7 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
           // generate TTS via Deepgram and collect base64
           const resp = await deepgram.speak.request(
             { text: message },
-            { model: "aura-asteria-en", encoding: "linear16", container: "wav" }
+            { model: "aura-2-saturn-en", encoding: "linear16", container: "wav" }
           );
           const stream = await resp.getStream();
           const reader = stream.getReader();
@@ -254,23 +269,18 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
       }
 
       // Emit ai-conversation with optional audio
-      // Emit ai-conversation with optional audio
       state.socket.emit("ai-conversation", {
         message,
         intent,
         audio: audioBase64, // frontend will play this if present
       });
 
-      // When marking "awaiting confirmation" prefer the combined partial answer (if any),
-      // otherwise fallback to the latest chunk `transcript`
+      // When marking "awaiting confirmation" prefer the combined partial answer
       if (intent === "COMPLETE") {
-        state.awaitingConfirmation =
-          state.partialAnswer && state.partialAnswer.trim()
-            ? state.partialAnswer
-            : transcript;
+        state.awaitingConfirmation = state.partialAnswer || transcript;
         console.log(
-          "📝 [BACKEND] awaitingConfirmation set (len):",
-          (state.awaitingConfirmation || "").length
+          "🔍 [BACKEND] Storing for confirmation:",
+          (state.awaitingConfirmation || "").substring(0, 50) + "..."
         );
       }
     } catch (err) {
@@ -307,7 +317,12 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
           state.handlingSubmit = false;
         }
         break;
-      case "RETRY":
+     case "RETRY":
+        state.currentTranscript = "";
+        state.partialAnswer = "";
+        state.awaitingConfirmation = null;
+        state.awaitingReanswerChoice = false;
+        state.recordedChunks = [];
         await reanswerNow();
         break;
 
@@ -348,12 +363,11 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
 
   async function saveAnswer(transcript) {
     try {
-      // ✅ Always prefer partialAnswer first
+      // ✅ Use the correct state reference for partialAnswer
       const toSave =
         (state.partialAnswer && state.partialAnswer.trim()) ||
         (transcript && transcript.trim()) ||
         (state.awaitingConfirmation && state.awaitingConfirmation.trim()) ||
-        (state.currentTranscript && state.currentTranscript.trim()) ||
         "";
 
       console.log("📝 [SAVE DEBUG]", {
@@ -501,7 +515,7 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
     try {
       const resp = await deepgram.speak.request(
         { text },
-        { model: "aura-asteria-en", encoding: "linear16", container: "wav" }
+        { model: "aura-2-saturn-en", encoding: "linear16", container: "wav" }
       );
       const stream = await resp.getStream();
       const reader = stream.getReader();
@@ -523,28 +537,75 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
   }
 
   async function reanswerNow() {
+    // Clear all transcript states completely - ensure deep clean
     state.currentTranscript = "";
     state.partialAnswer = "";
     state.awaitingConfirmation = null;
     state.awaitingReanswerChoice = false;
+    state.recordedChunks = [];
+    state.handlingSubmit = false;
+    
+    // Clear any pending AI analysis
+    if (state.socket._aiDebounce) {
+      clearTimeout(state.socket._aiDebounce);
+      state.socket._aiDebounce = null;
+    }
+    
     console.log("🔁 [BACKEND] REANSWER requested — restarting recording");
     await speakText("Okay, please answer again.");
+    
+    // Flush Deepgram to start fresh and clear its buffer
     if (state.socket._dgWS?.readyState === WebSocket.OPEN) {
       try {
         state.socket._dgWS.send(JSON.stringify({ type: "Flush" }));
+        // Send a second flush after a small delay to ensure complete reset
+        setTimeout(() => {
+          if (state.socket._dgWS?.readyState === WebSocket.OPEN) {
+            state.socket._dgWS.send(JSON.stringify({ type: "Flush" }));
+          }
+        }, 100);
       } catch {}
     }
-    state.socket.emit("stt-ready", { autoStart: true }); // client will emit start-recording
+    
+    // Clear the frontend transcript by emitting empty transcript
+    state.socket.emit("live-transcription", {
+      text: "",
+      isFinal: true,
+      confidence: 0,
+    });
+    
+    // Give a small delay before starting recording again
+    setTimeout(() => {
+      state.socket.emit("stt-ready", { autoStart: true }); // client will emit start-recording
+    }, 300);
   }
 
   function cleanup() {
     try {
       session.isActive = false;
+      
+      // Clear all pending timers
+      if (state.socket._aiDebounce) {
+        clearTimeout(state.socket._aiDebounce);
+        state.socket._aiDebounce = null;
+      }
+      
+      // Close Deepgram connection if open
       if (state.socket._dgWS?.readyState === WebSocket.OPEN) {
         try {
           state.socket._dgWS.send(JSON.stringify({ type: "Flush" }));
+          state.socket._dgWS.close();
         } catch {}
       }
+      
+      // Clear all state variables
+      state.currentTranscript = "";
+      state.partialAnswer = "";
+      state.awaitingConfirmation = null;
+      state.awaitingReanswerChoice = false;
+      state.recordedChunks = [];
+      state.handlingSubmit = false;
+      
     } catch (e) {
       console.error("❌ Cleanup error:", e);
     }
@@ -578,7 +639,7 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
     saveAnswer, // 🔑 expose saveAnswer
     initializeTest,
     loadQuestion,
-
+    handleUserIntent, // 🔑 expose handleUserIntent for keyword detection
     speakText,
     cleanup,
     analyzeUserSpeech, // expose for use outside
@@ -700,44 +761,75 @@ function handleDeepgramMessage(socket, msg) {
     const isFinal = !!data.is_final || !!data.speech_final;
     if (!transcript) return;
 
-    // 🚀 Forward interim immediately – no blocking
+    // 🚀 IMMEDIATE forward - zero delay for live transcription
     socket.emit("live-transcription", {
       text: transcript,
       isFinal,
       confidence: data.channel?.alternatives?.[0]?.confidence || 0,
     });
 
-    // ✅ Exit early if interim – do NOT block on AI / saving
-    // ✅ Exit early if interim – do NOT block on AI / saving
-    if (!isFinal) {
-      return; // interim transcripts go directly to frontend, no AI
+    // Exit immediately for interim - no processing
+    if (!isFinal) return;
+
+    const activeSession = socket._session;
+    if (!activeSession) return;
+    
+    // Build transcript incrementally
+    if (!activeSession.state.partialAnswer) activeSession.state.partialAnswer = "";
+    activeSession.state.partialAnswer +=
+      (activeSession.state.partialAnswer ? " " : "") + transcript;
+
+    console.log(`🔍 [STT][final] ${socket.id}: "${transcript}"`);
+
+    // Check for immediate action keywords first (before AI)
+    const lowerTranscript = transcript.toLowerCase();
+    
+    // Immediate keyword detection - handle these immediately without AI
+    if (/\b(submit|save|done|yes|final)\b/.test(lowerTranscript) && activeSession.state.awaitingConfirmation) {
+      console.log("🎯 [KEYWORD] Quick submit detected");
+      activeSession.handleUserIntent("SUBMIT", activeSession.state.awaitingConfirmation).catch(console.error);
+      return;
+    }
+    
+    if (/\b(re[-\s]?answer|retry|again|re[-\s]?record|start over)\b/.test(lowerTranscript)) {
+      console.log("🎯 [KEYWORD] Quick reanswer detected");
+      activeSession.handleUserIntent("RETRY").catch(console.error);
+      return;
+    }
+    
+    if (/\b(next|skip|continue|move on)\b/.test(lowerTranscript) && activeSession.state.awaitingReanswerChoice) {
+      console.log("🎯 [KEYWORD] Quick next detected");
+      activeSession.handleUserIntent("NEXT").catch(console.error);
+      return;
     }
 
-    if (isFinal) {
-      const activeSession = socket._session;
-      if (!activeSession) return;
-      const cleaned = transcript.trim();
-      if (!activeSession.partialAnswer) activeSession.partialAnswer = "";
-      activeSession.partialAnswer +=
-        (activeSession.partialAnswer ? " " : "") + cleaned;
+    // Skip AI analysis for very short phrases (single words, connectors)
+    // This prevents AI from analyzing every "and", "the", "to", etc.
+    const words = transcript.split(/\s+/);
+    if (words.length <= 2 &&
+        !/\.$|!$|\?$/.test(transcript) && // Skip if not ending with punctuation
+        !/\b(complete|done|submit|reanswer|retry|next)\b/i.test(transcript)) {
+      console.log(`⏭️ [AI] Skipping analysis for short phrase: "${transcript}"`);
+      return;
+    }
 
-      console.log(`📝 [STT][final] ${socket.id}: "${cleaned}"`);
-
-      // ⏸️ Run AI analysis only after silence / pause
-      clearTimeout(socket._aiDebounce);
-      socket._aiDebounce = setTimeout(() => {
+    // Check if this looks like a complete sentence (ends with punctuation)
+    const isCompleteSentence = /[.!?]$/.test(transcript);
+    
+    // Debounce AI analysis - shorter delay for complete sentences, longer for fragments
+    const debounceDelay = isCompleteSentence ? 1000 : 2000;
+    
+    clearTimeout(socket._aiDebounce);
+    socket._aiDebounce = setTimeout(() => {
+      // Run AI completely async in background
+      setImmediate(() => {
         if (activeSession?.analyzeUserSpeech) {
-          // Run AI in background, never block transcript flow
-          setImmediate(() => {
-            activeSession
-              .analyzeUserSpeech(activeSession.partialAnswer)
-              .catch((err) =>
-                console.error("❌ analyzeUserSpeech error:", err)
-              );
-          });
+          // Clone the transcript to avoid race conditions
+          const currentTranscript = activeSession.state.partialAnswer;
+          activeSession.analyzeUserSpeech(currentTranscript).catch(console.error);
         }
-      }, 1200); // ~1.2s pause = silence detection
-    }
+      });
+    }, debounceDelay);
   } catch (err) {
     console.error("❌ [STT] Error parsing Deepgram:", err);
   }
@@ -881,21 +973,21 @@ module.exports = (io) => {
     });
 
     // Allow frontend to directly emit `submit-answer` with optional { transcript }
-    socket.on("submit-answer", async (payload = {}) => {
+   socket.on("submit-answer", async (payload = {}) => {
       const session = socket._session;
       if (!session) return;
 
       if (session.state.handlingSubmit) {
         console.log(
-          "🔁 [SUBMIT] Duplicate submit ignored (submit-answer event)"
+          "🔍 [SUBMIT] Duplicate submit ignored (submit-answer event)"
         );
         return;
       }
       session.state.handlingSubmit = true;
       try {
-        // Always prefer partialAnswer, then payload, then awaitingConfirmation, then currentTranscript
+        // Fix: Use state.partialAnswer correctly
         const transcript =
-          (session.partialAnswer && session.partialAnswer.trim()) ||
+          (session.state.partialAnswer && session.state.partialAnswer.trim()) ||
           (payload && payload.transcript && payload.transcript.trim()) ||
           (session.state.awaitingConfirmation &&
             session.state.awaitingConfirmation.trim()) ||
@@ -999,7 +1091,7 @@ module.exports = (io) => {
       try {
         if (text && socket._session?.isActive) {
           const resp = await deepgram.speak.request(
-            { model: "aura-asteria-en" },
+            { model: "aura-2-saturn-en" },
             { text }
           );
           const buffer = Buffer.from(await resp.arrayBuffer());
@@ -1012,6 +1104,8 @@ module.exports = (io) => {
       }
     });
 
+ 
+// disconnect 
     socket.on("disconnect", () => {
       try {
         socket._session?.cleanup();
