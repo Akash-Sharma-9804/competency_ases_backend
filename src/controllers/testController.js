@@ -121,9 +121,9 @@ Return only the questions in a numbered list, with no extra commentary.
    prompt = `
 You are an expert HR and technical interviewer.
 
-Generate 50 ${difficulty || "medium"}-level multiple-choice interview questions (WITHOUT answers), crafted to deeply assess the candidate’s knowledge, reasoning, and practical skills related to the job role.
+Generate 50 ${difficulty || "medium"}-level, in-depth, scenario-driven interview questions (WITHOUT answers), designed to rigorously test the candidate’s expertise, analytical thinking, and practical problem-solving abilities related to the job role.
 
-Focus on scenario-based, problem-solving, and real-world application questions rather than basic fact-recall or overly simple queries, unless they are essential for the job function.
+Questions should explore complex situations, critical decision-making, troubleshooting, ethical considerations, process optimization, and applied knowledge rather than basic definitions or fact-recall unless absolutely critical for the job’s core responsibilities.
 
 Job Role: ${role}
 Sector: ${sector}
@@ -147,23 +147,28 @@ Use BOTH of these information sources together:
 ${extraContext ? `\n${extraContext}\n` : ""}
 
 ⚠️ Strict Instructions:
-- Focus primarily on the skills, technologies, and knowledge required for the job role and description.
-- Use the reference content to add depth and detail (frameworks, processes, compliance points, technical details) **only if they are relevant to the job**.
-- **Do NOT include answer choices or multiple‑choice options.**
-- **Do NOT mention “files,” “reference materials,” authors, or personal info.**
-- Each question must be clear, specific, and directly testable as a standalone question.
-- Avoid overly generic questions that test only basic definitions, unless they are critical to the job role.
-- Cover a balanced mix of topics from both the job description and the reference content.
+- Prioritize generating advanced questions that test a candidate’s ability to handle real-world problems, technical challenges, cross-functional collaboration, and critical thinking in the context of the job role, sector, and description.
+- Use reference content to enrich the questions with industry best practices, compliance standards, frameworks, methodologies, and domain-specific nuances **only when they directly support the job requirements**.
+- Avoid including multiple-choice formats; questions should be open-ended, thought-provoking, and designed to assess deep understanding, reasoning, and problem-solving capabilities.
+- Do not mention “files,” “reference materials,” authors, or personal information in the questions.
+- Ensure that each question is complex, clear, and structured to test the candidate’s ability to analyze, synthesize, and apply knowledge in practical scenarios.
+- Steer clear of generic or definition-based questions unless they are essential to the role’s functions or critical safety or compliance requirements.
+- Craft questions that explore cross-domain challenges, troubleshooting steps, process improvements, risk management, and ethical considerations.
+- When files are not provided, focus entirely on the job sector, role, and description to create nuanced questions that simulate real tasks, responsibilities, and challenges the candidate may face.
+
 
 🎯 Goal:
-Produce 50 highly relevant, professional-grade interview questions (plain questions only, no answer options), designed to challenge and evaluate both theoretical knowledge and practical expertise.
+Produce 50 expert-level, scenario-based, and application-focused interview questions (plain questions only, no answer options), designed to thoroughly assess both deep technical expertise and complex problem-solving abilities.
 
-- Questions should explore critical skills, technologies, problem-solving approaches, and decision-making processes.
-- Avoid generic definitions or surface-level questions unless they are indispensable for the role.
-- Emphasize real-world scenarios, case-based questions, troubleshooting tasks, and applied knowledge from both job details and reference content.
-- Ensure each question is clear, concise, and tests a candidate’s ability to perform or reason through tasks required for the job.
+- Questions should challenge candidates to think critically, make informed decisions, and solve problems they would realistically face in the job role and sector.
+- Include questions that explore troubleshooting, risk assessment, ethical dilemmas, process optimization, and strategic planning.
+- Avoid surface-level or definition-based questions unless they are essential for compliance, safety, or foundational understanding.
+- Use job details and sector information to craft nuanced, high-stakes scenarios that require thoughtful analysis and applied knowledge.
+- Frame each question as a standalone, testable prompt without requiring additional explanation or context.
+- When reference files are missing, ensure that questions are still comprehensive, leveraging the job role, sector, and description to simulate practical challenges, industry-specific problems, and role-related decision-making.
 
 Return only the questions in a numbered list, with no extra commentary and no answer choices.
+
 `;
     }
 
@@ -177,7 +182,7 @@ Return only the questions in a numbered list, with no extra commentary and no an
         { role: "user", content: prompt },
       ],
       temperature: 0.7,
-      max_tokens: 2000,
+      max_tokens: 7000,
     });
 
     const raw = completion.choices[0].message.content;

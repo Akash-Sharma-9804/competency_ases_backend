@@ -41,6 +41,7 @@ function createSession(socket, { testId, userId, openai, deepgram }) {
     isListening: false,
     dgConn: null,
     recordedChunks: [], // ✅ initialize here
+    partialAnswerBuffer: [], // ✅ initialize buffer early to prevent undefined errors
   };
 
   // 🔑 expose state so audio-data handler can access it
@@ -71,8 +72,8 @@ function createSession(socket, { testId, userId, openai, deepgram }) {
       return false;
     }
   }
- 
- async function loadQuestion(index) {
+
+  async function loadQuestion(index) {
     if (!state.questions || index >= state.questions.length) {
       safeEmit("test-completed", { answers: true });
       cleanup();
@@ -87,7 +88,7 @@ function createSession(socket, { testId, userId, openai, deepgram }) {
     state.awaitingReanswerChoice = false;
     state.recordedChunks = [];
     state.handlingSubmit = false;
-    
+
     // Clear any pending AI debounce timers
     if (state.socket._aiDebounce) {
       clearTimeout(state.socket._aiDebounce);
@@ -138,117 +139,51 @@ function createSession(socket, { testId, userId, openai, deepgram }) {
     }
   }
 
-async function analyzeUserSpeech(transcript) {
-    try {
-      // Note: Immediate keyword detection is now handled in handleDeepgramMessage
-      // before this function is called, so we only get here for non-keyword cases
+  async function analyzeUserSpeech(transcript) {
+  try {
+    // Skip very short incomplete phrases
+    const words = transcript.split(/\s+/);
+    if (words.length <= 2 && !/[.!?]$/.test(transcript)) {
+      return;
+    }
 
-      // Additional filtering to prevent unnecessary AI calls
-      // Skip AI analysis for very short or incomplete phrases
-      const words = transcript.split(/\s+/);
-      if (words.length <= 3 &&
-          !/[.!?]$/.test(transcript) && // Not a complete sentence
-          !/\b(complete|done|submit|finished|that's|this is)\b/i.test(transcript)) {
-        console.log(`⏭️ [AI] Skipping analysis for short/incomplete phrase: "${transcript}"`);
-        return;
-      }
-
-      // Only call OpenAI for AI analysis (this runs in background)
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are an AI exam proctor.
-The student is answering verbally.
-Your job: decide if they are still thinking, mid-answer, or done.
-
+    // Use Promise for non-blocking AI call
+    const aiPromise = openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You are an AI exam proctor. Analyze if the student is done answering.
 Rules:
-- If the answer looks incomplete or mid-sentence → CONTINUE
-- If the answer looks like a full thought → COMPLETE
-- Do not decide SUBMIT directly. Only return COMPLETE if done.
-- Consider sentence structure, completeness, and natural pauses
+- If incomplete or mid-sentence → CONTINUE
+- If complete thought → COMPLETE
 Reply with exactly one word: CONTINUE or COMPLETE.`,
-          },
-          {
-            role: "user",
-            content: `Question: "${
-              state.questions[state.currentQuestionIndex]?.text || ""
-            }"\nUser's answer so far: "${transcript}"`,
-          },
-        ],
-        temperature: 0,
-        max_tokens: 5,
-      });
+        },
+        {
+          role: "user",
+          content: `Question: "${state.questions[state.currentQuestionIndex]?.text || ""}"\nAnswer: "${transcript}"`,
+        },
+      ],
+      temperature: 0,
+      max_tokens: 5,
+    });
 
+    // Don't await immediately - let it run in background
+    aiPromise.then(response => {
       const raw = response.choices?.[0]?.message?.content || "";
-      let intent = "CONTINUE";
-      
       const match = raw.toUpperCase().match(/(COMPLETE|CONTINUE)/);
-      intent = match ? match[1] : "CONTINUE";
+      const intent = match ? match[1] : "CONTINUE";
 
-      console.log(`🧠 [AI] intent parsed: ${intent} for: "${transcript.substring(0, 50)}${transcript.length > 50 ? '...' : ''}"`);
+      console.log(`🧠 [AI] Intent: ${intent}`);
 
-      // Handle confirmation states (moved from keyword detection to here)
-      if (
-        (state.awaitingConfirmation || state.awaitingReanswerChoice) &&
-        transcript &&
-        transcript.trim()
-      ) {
-        const l = transcript.toLowerCase();
-
-        // 1) Re-answer path
-        if (
-          /\b(re[- ]?answer|retry|try again|re[- ]?record|start over|again)\b/.test(
-            l
-          )
-        ) {
-          state.awaitingConfirmation = null;
-          state.awaitingReanswerChoice = false;
-          state.partialAnswer = "";
-          await handleUserIntent("RETRY");
-          return;
-        }
-
-        // 2) If we were in "already answered" prompt, allow "next"/"move on"/"continue"
-        if (
-          state.awaitingReanswerChoice &&
-          /\b(next|move on|continue)\b/.test(l)
-        ) {
-          state.awaitingReanswerChoice = false;
-          await handleUserIntent("NEXT");
-          return;
-        }
-
-        // 3) Normal submit confirmation
-        if (
-          !state.awaitingReanswerChoice &&
-          /\b(submit|save|final|done|yes)\b/.test(l)
-        ) {
-          const finalForSubmit =
-            state.partialAnswer && state.partialAnswer.trim()
-              ? state.partialAnswer
-              : state.awaitingConfirmation || transcript;
-          await handleUserIntent("SUBMIT", finalForSubmit);
-          state.awaitingConfirmation = null;
-          return;
-        }
-      }
-
-      // Prepare message & (if COMPLETE) generate TTS and include audio in payload
-      const message =
-        intent === "COMPLETE"
-          ? "I heard your answer. Do you want to submit it or reanswer?"
-          : null;
-
-      let audioBase64 = null;
-      if (message) {
-        try {
-          // generate TTS via Deepgram and collect base64
-          const resp = await deepgram.speak.request(
-            { text: message },
-            { model: "aura-2-saturn-en", encoding: "linear16", container: "wav" }
-          );
+      if (intent === "COMPLETE") {
+        state.awaitingConfirmation = state.partialAnswer || transcript;
+        
+        // Generate TTS in background
+        deepgram.speak.request(
+          { text: "I heard your answer. Do you want to submit it or reanswer?" },
+          { model: "aura-2-saturn-en", encoding: "linear16", container: "wav" }
+        ).then(async resp => {
           const stream = await resp.getStream();
           const reader = stream.getReader();
           const chunks = [];
@@ -257,36 +192,27 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
             if (done) break;
             chunks.push(value);
           }
-          const dataArray = chunks.reduce(
+          const buffer = Buffer.from(chunks.reduce(
             (acc, chunk) => Uint8Array.from([...acc, ...chunk]),
             new Uint8Array(0)
-          );
-          const buffer = Buffer.from(dataArray.buffer);
-          audioBase64 = buffer.toString("base64");
-        } catch (e) {
-          console.error("❌ TTS generation failed:", e);
-        }
+          ));
+          const audioBase64 = buffer.toString("base64");
+          
+          state.socket.emit("ai-conversation", { 
+            message: "I heard your answer. Do you want to submit it or reanswer?",
+            intent,
+            audio: audioBase64
+          });
+        }).catch(console.error);
       }
+    }).catch(err => {
+      console.error("❌ AI analysis failed:", err);
+    });
 
-      // Emit ai-conversation with optional audio
-      state.socket.emit("ai-conversation", {
-        message,
-        intent,
-        audio: audioBase64, // frontend will play this if present
-      });
-
-      // When marking "awaiting confirmation" prefer the combined partial answer
-      if (intent === "COMPLETE") {
-        state.awaitingConfirmation = state.partialAnswer || transcript;
-        console.log(
-          "🔍 [BACKEND] Storing for confirmation:",
-          (state.awaitingConfirmation || "").substring(0, 50) + "..."
-        );
-      }
-    } catch (err) {
-      console.error("❌ Speech analysis failed:", err);
-    }
+  } catch (err) {
+    console.error("❌ Speech analysis error:", err);
   }
+}
 
   async function handleUserIntent(intent, transcript) {
     switch (intent) {
@@ -296,6 +222,13 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
           return;
         }
         state.handlingSubmit = true;
+
+        // ✅ Fast path for confirmed submit
+        if (state.partialAnswer && state.partialAnswer.trim().length > 0) {
+          await processSubmit(state.partialAnswer.trim());
+          return;
+        }
+
         try {
           const finalTranscript =
             (transcript && transcript.trim()) ||
@@ -317,7 +250,7 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
           state.handlingSubmit = false;
         }
         break;
-     case "RETRY":
+      case "RETRY":
         state.currentTranscript = "";
         state.partialAnswer = "";
         state.awaitingConfirmation = null;
@@ -544,16 +477,16 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
     state.awaitingReanswerChoice = false;
     state.recordedChunks = [];
     state.handlingSubmit = false;
-    
+
     // Clear any pending AI analysis
     if (state.socket._aiDebounce) {
       clearTimeout(state.socket._aiDebounce);
       state.socket._aiDebounce = null;
     }
-    
+
     console.log("🔁 [BACKEND] REANSWER requested — restarting recording");
     await speakText("Okay, please answer again.");
-    
+
     // Flush Deepgram to start fresh and clear its buffer
     if (state.socket._dgWS?.readyState === WebSocket.OPEN) {
       try {
@@ -566,14 +499,14 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
         }, 100);
       } catch {}
     }
-    
+
     // Clear the frontend transcript by emitting empty transcript
     state.socket.emit("live-transcription", {
       text: "",
       isFinal: true,
       confidence: 0,
     });
-    
+
     // Give a small delay before starting recording again
     setTimeout(() => {
       state.socket.emit("stt-ready", { autoStart: true }); // client will emit start-recording
@@ -583,13 +516,13 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
   function cleanup() {
     try {
       session.isActive = false;
-      
+
       // Clear all pending timers
       if (state.socket._aiDebounce) {
         clearTimeout(state.socket._aiDebounce);
         state.socket._aiDebounce = null;
       }
-      
+
       // Close Deepgram connection if open
       if (state.socket._dgWS?.readyState === WebSocket.OPEN) {
         try {
@@ -597,15 +530,16 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
           state.socket._dgWS.close();
         } catch {}
       }
-      
+
       // Clear all state variables
-      state.currentTranscript = "";
+      // ✅ Reset buffer to avoid accumulation
+      state.partialAnswerBuffer = [];
       state.partialAnswer = "";
+      state.currentTranscript = "";
       state.awaitingConfirmation = null;
       state.awaitingReanswerChoice = false;
       state.recordedChunks = [];
       state.handlingSubmit = false;
-      
     } catch (e) {
       console.error("❌ Cleanup error:", e);
     }
@@ -647,113 +581,6 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
   };
 }
 
-// function startDeepgramStream(socket) {
-//   const deepgramSocket = new WebSocket(
-//     "wss://api.deepgram.com/v1/listen?model=nova-3&language=en-US&punctuate=true&smart_format=true&vad_events=true&interim_results=true&encoding=linear16&sample_rate=16000",
-//     { headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` } }
-//   );
-
-//   deepgramSocket.on("open", () => {
-//     console.log("✅ [STT] Deepgram live stream opened");
-//     // heartbeat ping to keep alive
-//     setInterval(() => {
-//       if (deepgramSocket.readyState === WebSocket.OPEN) {
-//         deepgramSocket.send(JSON.stringify({ type: "KeepAlive" }));
-//       }
-//     }, 5000);
-//   });
-
-//   deepgramSocket.on("message", (msg) => {
-//     try {
-//       const data = JSON.parse(msg.toString());
-//       const transcript = data.channel?.alternatives?.[0]?.transcript || "";
-//       const isFinal = !!data.is_final || !!data.speech_final;
-
-//       if (transcript && transcript.trim() !== "") {
-//         if (isFinal) {
-//           const classifySentence = (t) => {
-//             if (
-//               /[?]$/.test(t) ||
-//               /\b(who|what|when|where|why|how|is|are|do|does|did|can|could|would|should)\b/i.test(
-//                 t
-//               )
-//             )
-//               return "question";
-//             if (/[!]$/.test(t)) return "exclamation";
-//             return "statement";
-//           };
-//           const sentenceType = classifySentence(transcript.trim());
-//           console.log(
-//             `📝 [STT][final] ${
-//               socket.id
-//             }: "${transcript.trim()}" (${sentenceType})`
-//           );
-
-//           socket.emit("live-transcription", {
-//             text: transcript.trim(),
-//             isFinal: true,
-//             confidence: data.channel?.alternatives?.[0]?.confidence || 0,
-//             sentenceType,
-//           });
-
-//           // Use the per-socket session (defined above in io.on("connection"))
-//           // Use the per-socket session safely
-//           // SAFELY use per-socket session (no state reference here)
-//           const activeSession = socket._session;
-//           if (activeSession && transcript && transcript.trim()) {
-//             const userAnswer = transcript.trim();
-
-//             // Incrementally build transcript like a natural sentence
-//             if (!activeSession.partialAnswer) activeSession.partialAnswer = "";
-//             activeSession.partialAnswer +=
-//               (activeSession.partialAnswer ? " " : "") + userAnswer;
-
-//             console.log(
-//               `📝 [STT][built] ${socket.id}: "${activeSession.partialAnswer}"`
-//             );
-
-//             // Always send to AI — let AI decide if it's pause/continue/submit
-//             activeSession
-//               .analyzeUserSpeech(activeSession.partialAnswer, {
-//                 context:
-//                   "Determine if the user is still thinking (pause), mid-answer, or has completed. If incomplete sentence, return CONTINUE. If it looks complete or conclusive, return SUBMIT or NEXT.",
-//               })
-//               .catch((err) =>
-//                 console.error("❌ analyzeUserSpeech error:", err)
-//               );
-//           }
-//         } else {
-//           // interim – emit as non-final so frontend can show live text
-//           socket.emit("live-transcription", {
-//             text: transcript.trim(),
-//             isFinal: false,
-//           });
-//         }
-//       }
-//     } catch (err) {
-//       console.error("❌ [STT] Error parsing Deepgram:", err);
-//     }
-//   });
-
-//   deepgramSocket.on("error", (err) => {
-//     console.error("❌ [STT] Deepgram error:", err);
-//   });
-
-//   deepgramSocket.on("close", (code, reason) => {
-//     console.log(`🔌 [STT] Deepgram closed. Code: ${code}, Reason: ${reason}`);
-//     if (socket.connected) {
-//       console.log("🔄 [STT] Restarting Deepgram stream...");
-//       startDeepgramStream(socket);
-//     }
-//   });
-
-//   socket.on("audio-data", (buffer) => {
-//     if (deepgramSocket.readyState === WebSocket.OPEN) {
-//       deepgramSocket.send(buffer);
-//     }
-//   });
-// }
-
 function handleDeepgramMessage(socket, msg) {
   try {
     const data = JSON.parse(msg.toString());
@@ -761,77 +588,119 @@ function handleDeepgramMessage(socket, msg) {
     const isFinal = !!data.is_final || !!data.speech_final;
     if (!transcript) return;
 
-    // 🚀 IMMEDIATE forward - zero delay for live transcription
+    const activeSession = socket._session;
+    if (!activeSession) return;
+
+    // 🚀 IMMEDIATE forward - ALWAYS send to frontend first, no delay
+    const confidence = data.channel?.alternatives?.[0]?.confidence || 0;
+    console.log(
+      `📝 [STT] Received: "${transcript}" | Final: ${isFinal} | Conf: ${confidence}`
+    );
+
+    // CRITICAL: Send to frontend IMMEDIATELY - no conditions
     socket.emit("live-transcription", {
       text: transcript,
       isFinal,
-      confidence: data.channel?.alternatives?.[0]?.confidence || 0,
+      confidence,
     });
 
-    // Exit immediately for interim - no processing
+    // For interim results with low confidence, stop here
+    if (!isFinal && confidence < 0.85) {
+      return;
+    }
+
+    // Initialize buffer if needed
+    if (!activeSession.state.partialAnswerBuffer) {
+      activeSession.state.partialAnswerBuffer = [];
+    }
+
+    // Only process finals and high-confidence interims
+    if (isFinal || confidence >= 0.85) {
+      // Add to buffer without duplication
+      const exists = activeSession.state.partialAnswerBuffer.some(
+        (e) => e.text === transcript && Math.abs(e.timestamp - Date.now()) < 100
+      );
+
+      if (!exists) {
+        activeSession.state.partialAnswerBuffer.push({
+          text: transcript,
+          timestamp: Date.now(),
+        });
+
+        // Clean old entries (keep last 30 seconds)
+        const cutoff = Date.now() - 30000;
+        activeSession.state.partialAnswerBuffer =
+          activeSession.state.partialAnswerBuffer.filter(
+            (e) => e.timestamp > cutoff
+          );
+
+        // Update partial answer
+        activeSession.state.partialAnswer =
+          activeSession.state.partialAnswerBuffer.map((e) => e.text).join(" ");
+      }
+    }
+
+    // Only process finals for keywords and AI
     if (!isFinal) return;
 
-    const activeSession = socket._session;
-    if (!activeSession) return;
-    
-    // Build transcript incrementally
-    if (!activeSession.state.partialAnswer) activeSession.state.partialAnswer = "";
-    activeSession.state.partialAnswer +=
-      (activeSession.state.partialAnswer ? " " : "") + transcript;
-
-    console.log(`🔍 [STT][final] ${socket.id}: "${transcript}"`);
-
-    // Check for immediate action keywords first (before AI)
     const lowerTranscript = transcript.toLowerCase();
-    
-    // Immediate keyword detection - handle these immediately without AI
-    if (/\b(submit|save|done|yes|final)\b/.test(lowerTranscript) && activeSession.state.awaitingConfirmation) {
-      console.log("🎯 [KEYWORD] Quick submit detected");
-      activeSession.handleUserIntent("SUBMIT", activeSession.state.awaitingConfirmation).catch(console.error);
-      return;
+
+    // Immediate keyword detection - no AI needed
+    if (activeSession.state.awaitingConfirmation) {
+      if (
+        /\b(submit|save|done|yes|final|confirm|okay)\b/i.test(lowerTranscript)
+      ) {
+        console.log("🎯 [KEYWORD] Quick submit");
+        activeSession.handleUserIntent(
+          "SUBMIT",
+          activeSession.state.awaitingConfirmation
+        );
+        return;
+      }
+      if (
+        /\b(re[-\s]?answer|retry|again|start over)\b/i.test(lowerTranscript)
+      ) {
+        console.log("🎯 [KEYWORD] Quick retry");
+        activeSession.handleUserIntent("RETRY");
+        return;
+      }
     }
-    
-    if (/\b(re[-\s]?answer|retry|again|re[-\s]?record|start over)\b/.test(lowerTranscript)) {
-      console.log("🎯 [KEYWORD] Quick reanswer detected");
-      activeSession.handleUserIntent("RETRY").catch(console.error);
-      return;
-    }
-    
-    if (/\b(next|skip|continue|move on)\b/.test(lowerTranscript) && activeSession.state.awaitingReanswerChoice) {
-      console.log("🎯 [KEYWORD] Quick next detected");
-      activeSession.handleUserIntent("NEXT").catch(console.error);
+
+    if (
+      activeSession.state.awaitingReanswerChoice &&
+      /\b(next|skip|continue|move on)\b/.test(lowerTranscript)
+    ) {
+      console.log("🎯 [KEYWORD] Quick next");
+      activeSession.handleUserIntent("NEXT");
       return;
     }
 
-    // Skip AI analysis for very short phrases (single words, connectors)
-    // This prevents AI from analyzing every "and", "the", "to", etc.
+    // Skip AI for very short phrases
     const words = transcript.split(/\s+/);
-    if (words.length <= 2 &&
-        !/\.$|!$|\?$/.test(transcript) && // Skip if not ending with punctuation
-        !/\b(complete|done|submit|reanswer|retry|next)\b/i.test(transcript)) {
-      console.log(`⏭️ [AI] Skipping analysis for short phrase: "${transcript}"`);
+    if (words.length <= 2 && !/[.!?]$/.test(transcript)) {
       return;
     }
 
-    // Check if this looks like a complete sentence (ends with punctuation)
-    const isCompleteSentence = /[.!?]$/.test(transcript);
-    
-    // Debounce AI analysis - shorter delay for complete sentences, longer for fragments
-    const debounceDelay = isCompleteSentence ? 1000 : 2000;
-    
-    clearTimeout(socket._aiDebounce);
+    // NON-BLOCKING AI analysis using setImmediate
+    if (socket._aiDebounce) {
+      clearTimeout(socket._aiDebounce);
+    }
+
     socket._aiDebounce = setTimeout(() => {
-      // Run AI completely async in background
+      // Use setImmediate for truly non-blocking execution
       setImmediate(() => {
-        if (activeSession?.analyzeUserSpeech) {
-          // Clone the transcript to avoid race conditions
-          const currentTranscript = activeSession.state.partialAnswer;
-          activeSession.analyzeUserSpeech(currentTranscript).catch(console.error);
+        if (
+          activeSession?.analyzeUserSpeech &&
+          activeSession.state.partialAnswer
+        ) {
+          activeSession
+            .analyzeUserSpeech(activeSession.state.partialAnswer)
+            .catch((err) => console.error("❌ AI error (non-blocking):", err));
         }
       });
-    }, debounceDelay);
+    }, 200); // Reduced delay
   } catch (err) {
-    console.error("❌ [STT] Error parsing Deepgram:", err);
+    console.error("❌ [STT] Error:", err);
   }
 }
 
@@ -867,9 +736,17 @@ module.exports = (io) => {
         socket._audioQueue = [];
 
         dgWS.on("open", () => {
-          console.log("✅ [STT] Deepgram connection opened at start-test");
+          console.log("✅ [STT] Deepgram connection opened");
           socket._dgReady = true;
-          // flush queue if any
+
+          // Heartbeat to keep connection alive
+          socket._dgHeartbeat = setInterval(() => {
+            if (dgWS.readyState === WebSocket.OPEN) {
+              dgWS.send(JSON.stringify({ type: "KeepAlive" }));
+            }
+          }, 30000); // Every 30 seconds
+
+          // Process queued audio
           while (socket._audioQueue.length > 0) {
             const chunk = socket._audioQueue.shift();
             dgWS.send(chunk);
@@ -878,14 +755,49 @@ module.exports = (io) => {
 
         dgWS.on("message", (msg) => handleDeepgramMessage(socket, msg));
 
+       dgWS.on("close", (code, reason) => {
+  console.log(`🔌 [STT] Deepgram closed. Code: ${code}`);
+  if (socket._dgHeartbeat) {
+    clearInterval(socket._dgHeartbeat);
+  }
+  
+  // Auto-reconnect if socket still connected
+  if (socket.connected && socket._session?.isActive) {
+    console.log("🔄 [STT] Auto-reconnecting Deepgram...");
+    setTimeout(() => {
+      if (socket.connected && socket._session?.isActive) {
+        // Recreate connection
+        const newDgWS = new WebSocket(
+          "wss://api.deepgram.com/v1/listen?model=nova-3&language=en-US&punctuate=true&smart_format=true&vad_events=true&interim_results=true&encoding=linear16&sample_rate=16000",
+          {
+            headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` },
+          }
+        );
+        
+        // Transfer handlers
+        socket._dgWS = newDgWS;
+        socket._dgReady = false;
+        
+        newDgWS.on("open", () => {
+          console.log("✅ [STT] Deepgram reconnected");
+          socket._dgReady = true;
+          socket._dgHeartbeat = setInterval(() => {
+            if (newDgWS.readyState === WebSocket.OPEN) {
+              newDgWS.send(JSON.stringify({ type: "KeepAlive" }));
+            }
+          }, 30000);
+        });
+        
+        newDgWS.on("message", (msg) => handleDeepgramMessage(socket, msg));
+        newDgWS.on("error", (err) => console.error("❌ [STT] Deepgram error:", err));
+        newDgWS.on("close", arguments.callee); // Reuse same close handler
+      }
+    }, 1000);
+  }
+});
+
         dgWS.on("error", (err) => {
           console.error("❌ [STT] Deepgram error:", err);
-        });
-
-        dgWS.on("close", (code, reason) => {
-          console.log(
-            `🔌 [STT] Deepgram closed. Code: ${code}, Reason: ${reason}`
-          );
         });
       } catch (e) {
         console.error("❌ start-test error:", e);
@@ -973,7 +885,7 @@ module.exports = (io) => {
     });
 
     // Allow frontend to directly emit `submit-answer` with optional { transcript }
-   socket.on("submit-answer", async (payload = {}) => {
+    socket.on("submit-answer", async (payload = {}) => {
       const session = socket._session;
       if (!session) return;
 
@@ -1051,41 +963,43 @@ module.exports = (io) => {
     });
 
     socket.on("audio-data", (payload) => {
-      try {
-        let buffer;
-        if (payload instanceof ArrayBuffer) {
-          buffer = Buffer.from(payload);
-        } else if (ArrayBuffer.isView(payload)) {
-          buffer = Buffer.from(
-            payload.buffer,
-            payload.byteOffset,
-            payload.byteLength
-          );
-        } else if (Buffer.isBuffer(payload)) {
-          buffer = payload;
-        } else if (payload && payload.buffer instanceof ArrayBuffer) {
-          buffer = Buffer.from(payload.buffer);
-        } else {
-          console.warn("⚠️ [STT] Unsupported audio-data type");
-          return;
-        }
+  try {
+    let buffer;
+    if (payload instanceof ArrayBuffer) {
+      buffer = Buffer.from(payload);
+    } else if (ArrayBuffer.isView(payload)) {
+      buffer = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+    } else if (Buffer.isBuffer(payload)) {
+      buffer = payload;
+    } else {
+      return;
+    }
 
-        if (socket._dgReady && socket._dgWS?.readyState === WebSocket.OPEN) {
-          socket._dgWS.send(buffer);
-        } else {
-          socket._audioQueue.push(buffer);
-          // console.log(`📦 [STT] Queued audio chunk (${buffer.length} bytes)`);
-        }
-        // Collect audio per question so we can upload after submit
-        if (socket._session) {
-          const st = socket._session.state;
-          if (!st.recordedChunks) st.recordedChunks = [];
-          st.recordedChunks.push(buffer);
-        }
-      } catch (e) {
-        console.error("❌ [STT] audio-data error:", e);
+    // Send immediately if ready, otherwise queue
+    if (socket._dgReady && socket._dgWS?.readyState === WebSocket.OPEN) {
+      socket._dgWS.send(buffer);
+    } else {
+      if (!socket._audioQueue) socket._audioQueue = [];
+      socket._audioQueue.push(buffer);
+      
+      // Try to reconnect if needed
+      if (!socket._dgWS || socket._dgWS.readyState !== WebSocket.OPEN) {
+        console.log("⚠️ [STT] Deepgram not connected, triggering reconnect");
+        socket.emit("restart-stt");
       }
-    });
+    }
+
+    // Store for recording
+    if (socket._session?.state) {
+      if (!socket._session.state.recordedChunks) {
+        socket._session.state.recordedChunks = [];
+      }
+      socket._session.state.recordedChunks.push(buffer);
+    }
+  } catch (e) {
+    console.error("❌ [STT] audio-data error:", e);
+  }
+});
 
     socket.on("tts", async ({ text }, ack) => {
       try {
@@ -1104,10 +1018,15 @@ module.exports = (io) => {
       }
     });
 
- 
-// disconnect 
+    // disconnect
     socket.on("disconnect", () => {
       try {
+        if (socket._dgHeartbeat) {
+          clearInterval(socket._dgHeartbeat);
+        }
+        if (socket._dgWS?.readyState === WebSocket.OPEN) {
+          socket._dgWS.close();
+        }
         socket._session?.cleanup();
       } catch (_) {}
       socket._session = null;
