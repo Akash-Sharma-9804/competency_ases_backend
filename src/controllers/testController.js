@@ -312,14 +312,15 @@ For a one-hour assessment:
 - Practical: 2 main questions.
 - Real-world: 1–2 scenario-based questions.
 
-Generate at least 25 diverse, open-ended questions that test the candidate’s:
-- Theoretical knowledge (definitions, principles).
-- Practical skills (processes, tools, implementation).
-- Real-world problem-solving (case studies, troubleshooting, ethical scenarios).
+Generate at least 25 diverse, open-ended, and **challenging** questions that test the candidate’s:
+- Theoretical knowledge (in-depth principles, complex definitions, and critical reasoning).
+- Practical skills (multi-step processes, advanced tool usage, and implementation challenges).
+- Real-world problem-solving (high-stakes case studies, intricate troubleshooting, and nuanced ethical considerations).
 
-Questions should be thoughtfully designed, challenging, and relevant to the job role and sector. Avoid repetition and generic questions unless essential to the role. Prioritize questions that require analytical thinking, decision-making, and applied knowledge in realistic scenarios.
+Design questions that are thought-provoking, rigorous, and tailored to assess the candidate’s problem-solving, analytical thinking, and applied expertise under realistic constraints. Avoid repetition and simplistic questions unless foundational knowledge is essential. Prioritize questions that stretch understanding and test judgment, decision-making, and adaptability in complex scenarios.
 
 Return the questions in a numbered list format, with no explanations or answers.
+
 
 `;
 
@@ -347,14 +348,15 @@ For a one-hour conversational session:
 - Practical: 2.
 - Real-world: 1–2.
 
-Generate at least 25 advanced, scenario-driven questions that test the candidate’s:
-- Theoretical understanding (definitions, principles).
-- Practical skills (tools, processes, implementations).
-- Real-world application (case studies, troubleshooting, ethical decision-making).
+Generate at least 25 advanced, scenario-driven, and **difficult** questions that test the candidate’s:
+- Theoretical understanding (complex definitions, intricate principles, and critical thinking).
+- Practical skills (multi-layered processes, sophisticated toolsets, and real implementation hurdles).
+- Real-world application (high-pressure case studies, advanced troubleshooting, and deep ethical dilemmas).
 
-Design questions that are varied, challenging, and relevant to the job’s expectations and sector. Avoid repetition and surface-level questions unless foundational knowledge is required. Focus on analytical thinking, problem-solving, and applied knowledge that would prepare the candidate for real job responsibilities.
+Craft questions that challenge the candidate’s ability to analyze, reason, and make informed decisions in difficult, uncertain, or high-stakes situations. Avoid simple or repetitive questions unless absolutely necessary for foundational understanding. Emphasize problems that demand creativity, resilience, and advanced problem-solving skills aligned with the demands of the job role and sector.
 
 Return the questions in a numbered list format, with no explanations or answer choices.
+
 
 `;
 
