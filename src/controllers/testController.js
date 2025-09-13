@@ -41,6 +41,174 @@ const deepseek = new OpenAI({
 });
 // ------------------ Generate Questions ------------------
 
+// exports.generateAIQuestions = async (req, res) => {
+//   try {
+//     console.log("🧠 [AI] Starting question generation...");
+//     console.log("🔑 Auth info:", req.auth);
+
+//     // ✅ Allow both company and user (if you want users to also generate questions)
+//     // If you ONLY want company, leave this check:
+//     if (req.auth.role !== "company" && req.auth.role !== "user") {
+//       console.warn("❌ [AI] Unauthorized role:", req.auth.role);
+//       return res.status(403).json({ message: "Unauthorized" });
+//     }
+
+//     const { role, sector, description, difficulty, fileIds, sourceMode } =
+//       req.body;
+
+//     console.log("📋 [AI] Incoming data:", {
+//       role,
+//       sector,
+//       descriptionLength: description?.length,
+//       difficulty,
+//       fileIds,
+//     });
+
+//     if (!role || !sector || !description) {
+//       console.warn("⚠️ [AI] Missing required fields");
+//       return res.status(400).json({
+//         message: "Role, sector, and description are required.",
+//       });
+//     }
+
+//     let extraContext = "";
+//     if (Array.isArray(fileIds) && fileIds.length > 0) {
+//       console.log("📂 [AI] Fetching extracted text for file IDs:", fileIds);
+
+//       const whereClause = {};
+//       // if token is company, filter by company_id
+//       if (req.auth.role === "company") {
+//         whereClause.company_id = req.auth.company_id || req.auth.id;
+//       }
+//       // if token is user, filter by user_id
+//       if (req.auth.role === "user") {
+//         whereClause.user_id = req.auth.id;
+//       }
+//       whereClause.file_id = fileIds;
+
+//       const files = await UploadedFile.findAll({ where: whereClause });
+
+//       if (files && files.length > 0) {
+//         console.log(`✅ [AI] Found ${files.length} file(s) in DB.`);
+//         extraContext = files
+//           .map((f) => (f.extracted_text || "").trim())
+//           .filter((t) => t.length > 0)
+//           .join("\n\n");
+//         console.log(
+//           "🧵 [AI] Combined extracted text length:",
+//           extraContext.length
+//         );
+//       } else {
+//         console.warn("⚠️ [AI] No valid files found or no text extracted.");
+//       }
+//     } else {
+//       console.log("ℹ️ [AI] No fileIds provided, will use only job details.");
+//     }
+
+//     // ✅ Build a prompt that explicitly asks to mix both sources
+//     let prompt = "";
+
+//     if (sourceMode === "fileOnly") {
+//      prompt = `
+// You are an expert HR and technical interviewer.
+
+// Generate 50 ${difficulty || "medium"}-level multiple-choice interview questions (WITHOUT answers), thoughtfully designed to probe both fundamental and practical understanding of the topic, based **ONLY** on the following reference materials.
+
+// Avoid generic or definition-based questions unless they are critical to job success. Prioritize questions that test application, problem-solving, scenarios, and domain-specific expertise relevant to the role.
+
+// Reference Content:
+// ${extraContext}
+
+// Return only the questions in a numbered list, with no extra commentary.
+// `;
+
+//     } else if (sourceMode === "jobOnly") {
+//    prompt = `
+// You are an expert HR and technical interviewer.
+
+// Generate 50 ${difficulty || "medium"}-level, in-depth, scenario-driven interview questions (WITHOUT answers), designed to rigorously test the candidate’s expertise, analytical thinking, and practical problem-solving abilities related to the job role.
+
+// Questions should explore complex situations, critical decision-making, troubleshooting, ethical considerations, process optimization, and applied knowledge rather than basic definitions or fact-recall unless absolutely critical for the job’s core responsibilities.
+
+// Job Role: ${role}
+// Sector: ${sector}
+// Job Description: ${description}
+
+// Return only the questions in a numbered list, with no extra commentary.
+// `;
+
+//     } else {
+//       // ✅ Improved blend mode prompt – plain questions only, no HTML bias
+//       prompt = `
+// You are an expert HR and technical interviewer tasked with creating a competency-based test.
+
+// Use BOTH of these information sources together:
+// 1. **Job Details** – defines the target role and what the candidate should know:
+//    - Job Role: ${role}
+//    - Sector: ${sector}
+//    - Job Description: ${description}
+
+// 2. **Reference Content** – these uploaded materials may contain training guides, specifications, standards, or other relevant subject matter:
+// ${extraContext ? `\n${extraContext}\n` : ""}
+
+// ⚠️ Strict Instructions:
+// - Prioritize generating advanced questions that test a candidate’s ability to handle real-world problems, technical challenges, cross-functional collaboration, and critical thinking in the context of the job role, sector, and description.
+// - Use reference content to enrich the questions with industry best practices, compliance standards, frameworks, methodologies, and domain-specific nuances **only when they directly support the job requirements**.
+// - Avoid including multiple-choice formats; questions should be open-ended, thought-provoking, and designed to assess deep understanding, reasoning, and problem-solving capabilities.
+// - Do not mention “files,” “reference materials,” authors, or personal information in the questions.
+// - Ensure that each question is complex, clear, and structured to test the candidate’s ability to analyze, synthesize, and apply knowledge in practical scenarios.
+// - Steer clear of generic or definition-based questions unless they are essential to the role’s functions or critical safety or compliance requirements.
+// - Craft questions that explore cross-domain challenges, troubleshooting steps, process improvements, risk management, and ethical considerations.
+// - When files are not provided, focus entirely on the job sector, role, and description to create nuanced questions that simulate real tasks, responsibilities, and challenges the candidate may face.
+
+
+// 🎯 Goal:
+// Produce 50 expert-level, scenario-based, and application-focused interview questions (plain questions only, no answer options), designed to thoroughly assess both deep technical expertise and complex problem-solving abilities.
+
+// - Questions should challenge candidates to think critically, make informed decisions, and solve problems they would realistically face in the job role and sector.
+// - Include questions that explore troubleshooting, risk assessment, ethical dilemmas, process optimization, and strategic planning.
+// - Avoid surface-level or definition-based questions unless they are essential for compliance, safety, or foundational understanding.
+// - Use job details and sector information to craft nuanced, high-stakes scenarios that require thoughtful analysis and applied knowledge.
+// - Frame each question as a standalone, testable prompt without requiring additional explanation or context.
+// - When reference files are missing, ensure that questions are still comprehensive, leveraging the job role, sector, and description to simulate practical challenges, industry-specific problems, and role-related decision-making.
+
+// Return only the questions in a numbered list, with no extra commentary and no answer choices.
+
+// `;
+//     }
+
+//     console.log("📝 [AI] Prompt ready, length:", prompt.length);
+
+//       // ✅ Call DeepSeek instead of GPT
+//     const completion = await deepseek.chat.completions.create({
+//       model: "deepseek-chat", // DeepSeek chat model
+//       messages: [
+//         { role: "system", content: "You are an expert HR and interviewer." },
+//         { role: "user", content: prompt },
+//       ],
+//       temperature: 0.7,
+//       max_tokens: 8000, // DeepSeek supports much larger token windows
+//     });
+
+//     const raw = completion.choices[0].message.content;
+//     console.log("✅ [AI] Response received, length:", raw.length);
+
+//     const questions = raw
+//       .split("\n")
+//       .map((line) => line.trim())
+//       .filter((line) => line.length > 0)
+//       .map((line) => line.replace(/^\d+[\.\)]\s*/, "").trim());
+
+//     console.log("✅ [AI] Final question count:", questions.length);
+//     return res.json({ questions });
+//   } catch (err) {
+//     console.error("❌ [AI] Error:", err);
+//     return res
+//       .status(500)
+//       .json({ message: "AI generation failed", error: err.message });
+//   }
+// };
+
 exports.generateAIQuestions = async (req, res) => {
   try {
     console.log("🧠 [AI] Starting question generation...");
@@ -53,18 +221,18 @@ exports.generateAIQuestions = async (req, res) => {
       return res.status(403).json({ message: "Unauthorized" });
     }
 
-    const { role, sector, description, difficulty, fileIds, sourceMode } =
+    const { role, sector,   difficulty, fileIds, sourceMode } =
       req.body;
 
     console.log("📋 [AI] Incoming data:", {
       role,
       sector,
-      descriptionLength: description?.length,
+      
       difficulty,
       fileIds,
     });
 
-    if (!role || !sector || !description) {
+    if (!role || !sector ) {
       console.warn("⚠️ [AI] Missing required fields");
       return res.status(400).json({
         message: "Role, sector, and description are required.",
@@ -123,58 +291,73 @@ Return only the questions in a numbered list, with no extra commentary.
 `;
 
     } else if (sourceMode === "jobOnly") {
-   prompt = `
-You are an expert HR and technical interviewer.
+  prompt = `
+You are an expert adaptive interviewer conducting a conversational assessment for a candidate.
 
-Generate 50 ${difficulty || "medium"}-level, in-depth, scenario-driven interview questions (WITHOUT answers), designed to rigorously test the candidate’s expertise, analytical thinking, and practical problem-solving abilities related to the job role.
+The candidate is applying for the job:
+- Job Title: ${role}
+- Sector: ${sector}
 
-Questions should explore complex situations, critical decision-making, troubleshooting, ethical considerations, process optimization, and applied knowledge rather than basic definitions or fact-recall unless absolutely critical for the job’s core responsibilities.
+Given the conversational nature of this assessment, questions will be dynamically generated and adapted as the candidate responds. However, the underlying distribution of knowledge areas remains:
 
-Job Role: ${role}
-Sector: ${sector}
-Job Description: ${description}
+Knowledge Type      Percentage      Focus Areas
+Theoretical         40%            Definitions, principles, foundational concepts.
+Practical           35%            Step-by-step processes, tool usage, implementation.
+Real-World Application 25%         Scenario-based problem-solving, case studies, ethical considerations.
 
-Return only the questions in a numbered list, with no extra commentary.
+For a one-hour assessment:
+- Total conversational turns: approximately 15–20 exchanges (AI question → candidate response → follow-up).
+- Core questions: 5–7 main questions, each with potential follow-ups.
+- Theoretical: 2–3 main questions.
+- Practical: 2 main questions.
+- Real-world: 1–2 scenario-based questions.
+
+Generate at least 25 diverse, open-ended questions that test the candidate’s:
+- Theoretical knowledge (definitions, principles).
+- Practical skills (processes, tools, implementation).
+- Real-world problem-solving (case studies, troubleshooting, ethical scenarios).
+
+Questions should be thoughtfully designed, challenging, and relevant to the job role and sector. Avoid repetition and generic questions unless essential to the role. Prioritize questions that require analytical thinking, decision-making, and applied knowledge in realistic scenarios.
+
+Return the questions in a numbered list format, with no explanations or answers.
+
 `;
+
 
     } else {
       // ✅ Improved blend mode prompt – plain questions only, no HTML bias
-      prompt = `
-You are an expert HR and technical interviewer tasked with creating a competency-based test.
+     prompt = `
+You are an expert adaptive interviewer facilitating a conversational assessment tailored to the candidate’s progress.
 
-Use BOTH of these information sources together:
-1. **Job Details** – defines the target role and what the candidate should know:
-   - Job Role: ${role}
-   - Sector: ${sector}
-   - Job Description: ${description}
+The candidate is applying for the job:
+- Job Title: ${role}
+- Sector: ${sector}
 
-2. **Reference Content** – these uploaded materials may contain training guides, specifications, standards, or other relevant subject matter:
-${extraContext ? `\n${extraContext}\n` : ""}
+This conversational assessment aims to evaluate their understanding through dynamically generated questions. The knowledge areas are distributed as follows:
 
-⚠️ Strict Instructions:
-- Prioritize generating advanced questions that test a candidate’s ability to handle real-world problems, technical challenges, cross-functional collaboration, and critical thinking in the context of the job role, sector, and description.
-- Use reference content to enrich the questions with industry best practices, compliance standards, frameworks, methodologies, and domain-specific nuances **only when they directly support the job requirements**.
-- Avoid including multiple-choice formats; questions should be open-ended, thought-provoking, and designed to assess deep understanding, reasoning, and problem-solving capabilities.
-- Do not mention “files,” “reference materials,” authors, or personal information in the questions.
-- Ensure that each question is complex, clear, and structured to test the candidate’s ability to analyze, synthesize, and apply knowledge in practical scenarios.
-- Steer clear of generic or definition-based questions unless they are essential to the role’s functions or critical safety or compliance requirements.
-- Craft questions that explore cross-domain challenges, troubleshooting steps, process improvements, risk management, and ethical considerations.
-- When files are not provided, focus entirely on the job sector, role, and description to create nuanced questions that simulate real tasks, responsibilities, and challenges the candidate may face.
+Knowledge Type      Percentage      Focus Areas
+Theoretical         40%            Definitions, principles, foundational concepts.
+Practical           35%            Step-by-step processes, tool usage, implementation.
+Real-World Application 25%         Scenario-based problem-solving, case studies, ethical considerations.
 
+For a one-hour conversational session:
+- Expect ~15–20 exchanges including follow-ups and clarifications.
+- Core questions: 5–7 main ones.
+- Theoretical: 2–3.
+- Practical: 2.
+- Real-world: 1–2.
 
-🎯 Goal:
-Produce 50 expert-level, scenario-based, and application-focused interview questions (plain questions only, no answer options), designed to thoroughly assess both deep technical expertise and complex problem-solving abilities.
+Generate at least 25 advanced, scenario-driven questions that test the candidate’s:
+- Theoretical understanding (definitions, principles).
+- Practical skills (tools, processes, implementations).
+- Real-world application (case studies, troubleshooting, ethical decision-making).
 
-- Questions should challenge candidates to think critically, make informed decisions, and solve problems they would realistically face in the job role and sector.
-- Include questions that explore troubleshooting, risk assessment, ethical dilemmas, process optimization, and strategic planning.
-- Avoid surface-level or definition-based questions unless they are essential for compliance, safety, or foundational understanding.
-- Use job details and sector information to craft nuanced, high-stakes scenarios that require thoughtful analysis and applied knowledge.
-- Frame each question as a standalone, testable prompt without requiring additional explanation or context.
-- When reference files are missing, ensure that questions are still comprehensive, leveraging the job role, sector, and description to simulate practical challenges, industry-specific problems, and role-related decision-making.
+Design questions that are varied, challenging, and relevant to the job’s expectations and sector. Avoid repetition and surface-level questions unless foundational knowledge is required. Focus on analytical thinking, problem-solving, and applied knowledge that would prepare the candidate for real job responsibilities.
 
-Return only the questions in a numbered list, with no extra commentary and no answer choices.
+Return the questions in a numbered list format, with no explanations or answer choices.
 
 `;
+
     }
 
     console.log("📝 [AI] Prompt ready, length:", prompt.length);
