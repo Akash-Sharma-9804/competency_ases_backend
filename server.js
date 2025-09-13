@@ -14,7 +14,7 @@ const io = new Server(server, {
   }
 });
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3002;
 
 // After defining models
 require('./src/models/relations'); // <-- this sets up associations
@@ -59,3 +59,5 @@ server.listen(PORT, () => {
   console.log(`🎯 TTS endpoint: /api/tests/:id/question-audio/:questionNo`);
   console.log(`🎤 Voice test WebSocket: Ready for connections`);
 });
+
+// app.listen(PORT, '127.0.0.1', () => {

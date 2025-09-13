@@ -41,7 +41,7 @@ function createSession(socket, { testId, userId, openai, deepgram }) {
     isListening: false,
     dgConn: null,
     recordedChunks: [], // ✅ initialize here
-    partialAnswerBuffer: [], // ✅ initialize buffer early to prevent undefined errors
+   partialAnswer: "", // Simple string instead of complex buffer
   };
 
   // 🔑 expose state so audio-data handler can access it
@@ -471,18 +471,12 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
 
   async function reanswerNow() {
     // Clear all transcript states completely - ensure deep clean
-    state.currentTranscript = "";
+   // Simple state reset
     state.partialAnswer = "";
     state.awaitingConfirmation = null;
     state.awaitingReanswerChoice = false;
     state.recordedChunks = [];
     state.handlingSubmit = false;
-
-    // Clear any pending AI analysis
-    if (state.socket._aiDebounce) {
-      clearTimeout(state.socket._aiDebounce);
-      state.socket._aiDebounce = null;
-    }
 
     console.log("🔁 [BACKEND] REANSWER requested — restarting recording");
     await speakText("Okay, please answer again.");
@@ -533,7 +527,7 @@ Reply with exactly one word: CONTINUE or COMPLETE.`,
 
       // Clear all state variables
       // ✅ Reset buffer to avoid accumulation
-      state.partialAnswerBuffer = [];
+       
       state.partialAnswer = "";
       state.currentTranscript = "";
       state.awaitingConfirmation = null;
@@ -585,120 +579,68 @@ function handleDeepgramMessage(socket, msg) {
   try {
     const data = JSON.parse(msg.toString());
     const transcript = data.channel?.alternatives?.[0]?.transcript?.trim();
+    const confidence = data.channel?.alternatives?.[0]?.confidence || 0;
     const isFinal = !!data.is_final || !!data.speech_final;
+    
     if (!transcript) return;
-
+    
     const activeSession = socket._session;
     if (!activeSession) return;
 
-    // 🚀 IMMEDIATE forward - ALWAYS send to frontend first, no delay
-    const confidence = data.channel?.alternatives?.[0]?.confidence || 0;
-    console.log(
-      `📝 [STT] Received: "${transcript}" | Final: ${isFinal} | Conf: ${confidence}`
-    );
-
-    // CRITICAL: Send to frontend IMMEDIATELY - no conditions
+    // 🚀 INSTANT frontend delivery - no conditions, no processing
+    console.log(`📝 [STT] Received: "${transcript}" | Final: ${isFinal} | Conf: ${confidence}`);
     socket.emit("live-transcription", {
       text: transcript,
       isFinal,
       confidence,
     });
 
-    // For interim results with low confidence, stop here
-    if (!isFinal && confidence < 0.85) {
-      return;
-    }
-
-    // Initialize buffer if needed
-    if (!activeSession.state.partialAnswerBuffer) {
-      activeSession.state.partialAnswerBuffer = [];
-    }
-
-    // Only process finals and high-confidence interims
-    if (isFinal || confidence >= 0.85) {
-      // Add to buffer without duplication
-      const exists = activeSession.state.partialAnswerBuffer.some(
-        (e) => e.text === transcript && Math.abs(e.timestamp - Date.now()) < 100
-      );
-
-      if (!exists) {
-        activeSession.state.partialAnswerBuffer.push({
-          text: transcript,
-          timestamp: Date.now(),
-        });
-
-        // Clean old entries (keep last 30 seconds)
-        const cutoff = Date.now() - 30000;
-        activeSession.state.partialAnswerBuffer =
-          activeSession.state.partialAnswerBuffer.filter(
-            (e) => e.timestamp > cutoff
-          );
-
-        // Update partial answer
-        activeSession.state.partialAnswer =
-          activeSession.state.partialAnswerBuffer.map((e) => e.text).join(" ");
-      }
-    }
-
-    // Only process finals for keywords and AI
+    // Only process finals for state updates
     if (!isFinal) return;
 
-    const lowerTranscript = transcript.toLowerCase();
+    // 🚀 MINIMAL state update - simple append
+    if (!activeSession.state.partialAnswer) {
+      activeSession.state.partialAnswer = "";
+    }
+    
+    if (activeSession.state.partialAnswer) {
+      activeSession.state.partialAnswer += " " + transcript;
+    } else {
+      activeSession.state.partialAnswer = transcript;
+    }
 
-    // Immediate keyword detection - no AI needed
+    // 🚀 INSTANT keyword detection
+    const lowerTranscript = transcript.toLowerCase();
+    
     if (activeSession.state.awaitingConfirmation) {
-      if (
-        /\b(submit|save|done|yes|final|confirm|okay)\b/i.test(lowerTranscript)
-      ) {
+      if (lowerTranscript.includes("submit") || lowerTranscript.includes("yes") || lowerTranscript.includes("done")) {
         console.log("🎯 [KEYWORD] Quick submit");
-        activeSession.handleUserIntent(
-          "SUBMIT",
-          activeSession.state.awaitingConfirmation
-        );
+        activeSession.handleUserIntent("SUBMIT", activeSession.state.partialAnswer);
         return;
       }
-      if (
-        /\b(re[-\s]?answer|retry|again|start over)\b/i.test(lowerTranscript)
-      ) {
+      if (lowerTranscript.includes("retry") || lowerTranscript.includes("again")) {
         console.log("🎯 [KEYWORD] Quick retry");
         activeSession.handleUserIntent("RETRY");
         return;
       }
     }
 
-    if (
-      activeSession.state.awaitingReanswerChoice &&
-      /\b(next|skip|continue|move on)\b/.test(lowerTranscript)
-    ) {
-      console.log("🎯 [KEYWORD] Quick next");
-      activeSession.handleUserIntent("NEXT");
-      return;
+    if (activeSession.state.awaitingReanswerChoice) {
+      if (lowerTranscript.includes("next") || lowerTranscript.includes("skip")) {
+        console.log("🎯 [KEYWORD] Quick next");
+        activeSession.handleUserIntent("NEXT");
+        return;
+      }
     }
 
-    // Skip AI for very short phrases
-    const words = transcript.split(/\s+/);
-    if (words.length <= 2 && !/[.!?]$/.test(transcript)) {
-      return;
-    }
+    // 🚀 COMPLETELY ASYNC AI - separate event loop
+    process.nextTick(() => {
+      if (activeSession?.state?.partialAnswer && activeSession.analyzeUserSpeech) {
+        activeSession.analyzeUserSpeech(activeSession.state.partialAnswer)
+          .catch(err => console.error("❌ AI error (async):", err));
+      }
+    });
 
-    // NON-BLOCKING AI analysis using setImmediate
-    if (socket._aiDebounce) {
-      clearTimeout(socket._aiDebounce);
-    }
-
-    socket._aiDebounce = setTimeout(() => {
-      // Use setImmediate for truly non-blocking execution
-      setImmediate(() => {
-        if (
-          activeSession?.analyzeUserSpeech &&
-          activeSession.state.partialAnswer
-        ) {
-          activeSession
-            .analyzeUserSpeech(activeSession.state.partialAnswer)
-            .catch((err) => console.error("❌ AI error (non-blocking):", err));
-        }
-      });
-    }, 200); // Reduced delay
   } catch (err) {
     console.error("❌ [STT] Error:", err);
   }

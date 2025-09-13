@@ -34,6 +34,11 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// ✅ Set up DeepSeek
+const deepseek = new OpenAI({
+  apiKey: process.env.DEEPSEEK_API_KEY, // store DeepSeek key in .env
+  baseURL: "https://api.deepseek.com", // DeepSeek endpoint
+});
 // ------------------ Generate Questions ------------------
 
 exports.generateAIQuestions = async (req, res) => {
@@ -174,15 +179,15 @@ Return only the questions in a numbered list, with no extra commentary and no an
 
     console.log("📝 [AI] Prompt ready, length:", prompt.length);
 
-    // ✅ Call OpenAI
-    const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
+      // ✅ Call DeepSeek instead of GPT
+    const completion = await deepseek.chat.completions.create({
+      model: "deepseek-chat", // DeepSeek chat model
       messages: [
         { role: "system", content: "You are an expert HR and interviewer." },
         { role: "user", content: prompt },
       ],
       temperature: 0.7,
-      max_tokens: 7000,
+      max_tokens: 8000, // DeepSeek supports much larger token windows
     });
 
     const raw = completion.choices[0].message.content;
